@@ -53,14 +53,23 @@ A buff missing from more than a few people prints "Too many!" instead of a long 
 Optional (Options → RaidAssist): an on-screen alert, a sound, and a raid/party chat message
 whenever anyone in your group dies — including yourself.
 
+<!-- Screenshot: RaidAssist tab, Death warnings option -->
+![Death warnings option](./screenshots/deathwarnings.png)
+
 ### Taunt resist warnings *(self only, for now)*
 Optional (Options → Tanks): an on-screen alert when **your own** Taunt fails (resisted, immune,
 dodged, etc.), read from the combat log. Detecting *other* players' taunts isn't implemented
 yet.
 
+<!-- Screenshot: Tanks tab, Taunt resist warnings option -->
+![Taunt resist warnings option](./screenshots/tanks.png)
+
 ### Auto-invite
 Optional (Options → RaidAssist): automatically invites anyone who whispers you exactly `inv`,
 `invite`, or `123`.
+
+<!-- Screenshot: RaidAssist tab, Auto-invite option -->
+![Auto-invite option](./screenshots/autoinvite.png)
 
 ### Settings window
 A full AceConfig-based options dialog with the same dark theme used across this client's
