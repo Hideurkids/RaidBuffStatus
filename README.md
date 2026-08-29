@@ -5,7 +5,7 @@ at a glance, which class buffs each raid or party member is missing — no more 
 "who doesn't have Fortitude?"
 
 <!-- Hero screenshot: the main window with several buff icons, hovering one to show its tooltip -->
-![RaidBuffStatus overview](./screenshots/overview.png)
+![RaidBuffStatus overview](./screenshots/overview.jpg)
 
 ## What it does
 
