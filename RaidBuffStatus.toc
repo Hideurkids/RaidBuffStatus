@@ -1,0 +1,16 @@
+## Interface: 11200
+## Title: RaidBuffStatus
+## Notes: Raid-wide buff tracker -- shows which class buffs each raid/party member is missing, at a glance.
+## Author: Hideurkids
+## Version: 0.1.0
+## OptionalDeps: !!!ClassicAPI
+## SavedVariablesPerCharacter: RaidBuffStatusConfig
+Libs\LibStub\LibStub.lua
+Libs\CallbackHandler-1.0\CallbackHandler-1.0.xml
+Libs\AceCore-3.0\AceCore-3.0.xml
+Libs\AceGUI-3.0\AceGUI-3.0.xml
+Libs\AceGUI-3.0\widgets\widgets.xml
+Libs\AceConfigRegistry-3.0\AceConfigRegistry-3.0.xml
+Libs\AceConfigDialog-3.0\AceConfigDialog-3.0.xml
+RaidBuffStatus.xml
+RaidBuffStatusOptions.lua
