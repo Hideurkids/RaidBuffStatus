@@ -56,13 +56,21 @@ whenever anyone in your group dies — including yourself.
 <!-- Screenshot: RaidAssist tab, Death warnings option -->
 ![Death warnings option](./screenshots/deathwarnings.png)
 
-### Taunt resist warnings *(self only, for now)*
-Optional (Options → Tanks): an on-screen alert when **your own** Taunt fails (resisted, immune,
-dodged, etc.), read from the combat log. Detecting *other* players' taunts isn't implemented
-yet.
+### Tank tools
+All optional, each independently toggleable in Options → Tanks:
 
-<!-- Screenshot: Tanks tab, Taunt resist warnings option -->
-![Taunt resist warnings option](./screenshots/tanks.png)
+- **Taunt resist warnings** *(self only, for now)* — an on-screen alert when **your own** Taunt
+  fails (resisted, immune, dodged, etc.). Detecting *other* players' taunts isn't implemented yet.
+- **Mocking Blow use-announce** — posts to raid/party chat whenever you use Mocking Blow, naming
+  your current target (with its raid mark, if any).
+- **Auto-remove Blessing of Salvation** — cancels Blessing of Salvation / Greater Blessing of
+  Salvation on yourself the instant it's detected, since it reduces threat generation.
+- **Announce misses at fight start** — for a configurable window after entering combat (default 8s),
+  posts your own melee misses/dodges/parries against your target to raid/party chat, an early
+  warning that threat isn't established yet.
+
+<!-- Screenshot: Tanks tab -->
+![Tank tools options](./screenshots/tanks.png)
 
 ### Auto-invite
 Optional (Options → RaidAssist): automatically invites anyone who whispers you exactly `inv`,

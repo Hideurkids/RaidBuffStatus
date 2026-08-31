@@ -32,12 +32,31 @@ RaidBuffStatusConfig.CDIconSize = RaidBuffStatusConfig.CDIconSize or 20
 if RaidBuffStatusConfig.CDShowLabels == nil then
 	RaidBuffStatusConfig.CDShowLabels = true
 end
+RaidBuffStatusConfig.MockingBlowAnnounce = RaidBuffStatusConfig.MockingBlowAnnounce or false
+RaidBuffStatusConfig.AutoRemoveSalvation = RaidBuffStatusConfig.AutoRemoveSalvation or false
+-- Per the user (2026-08-31): kept as its own independent option rather than bundled into a single
+-- umbrella "mode" switch, same as MockingBlowAnnounce/AutoRemoveSalvation above.
+RaidBuffStatusConfig.FightStartMisses = RaidBuffStatusConfig.FightStartMisses or false
+RaidBuffStatusConfig.FightStartMissesDuration = RaidBuffStatusConfig.FightStartMissesDuration or 8
 
 -- Bumped on every meaningful rewrite so a load-message screenshot can confirm which build is
 -- actually running, without having to ask the user to check -- also flags whether a stale/second
 -- copy of this addon (e.g. a leftover install of the old reference folder reusing the same global
 -- names) might be clobbering these functions after this file loads.
-RBS_BUILD = "v44-soulstone-announce"
+RBS_BUILD = "v48-tank-utilities-mocking-salvation-fightstart"
+
+-- CONFIRMED via real raid testing (2026-08-31): right after a disconnect/reconnect (server kick,
+-- zone in, etc.), C_UnitAuras.GetAuraDataByIndex can return NOTHING for a window of several
+-- seconds -- not just for other raid members, but for the LOCAL PLAYER's own buffs too (a tester's
+-- own Intellect showed as "missing" on themselves, at the same moment Well Fed and Flask both
+-- showed "missing: [the entire raid]" in the same /rbs debug dump -- ruling out a per-buff matching
+-- bug, since three unrelated buffs all failed identically at once). This is a client data-
+-- availability quirk, not something a smarter aura scan can work around. RBS_ScanSuppressUntil is a
+-- GetTime() deadline set on PLAYER_ENTERING_WORLD (login, reconnect, zoning) -- every scan-driven
+-- display (dashboard, tooltip, Announce, the CD tracker's aura-scan half) checks it and shows a
+-- neutral "still syncing" state instead of a real (and likely wrong) scan result until it passes.
+RBS_ScanSuppressUntil = 0
+local RBS_SCAN_SUPPRESS_SECONDS = 8
 
 ------------------------------------------------------------------------------------------------------
 -- BUFF LIST
@@ -343,6 +362,16 @@ local function RBS_BuffIcon_OnEnter()
 	GameTooltip:SetOwner(this, "ANCHOR_TOP")
 	GameTooltip:AddLine(this.rbsDef.label, 1, 1, 1)
 
+	-- See RBS_ScanSuppressUntil's own comment (near RBS_BUILD, top of file) -- right after a
+	-- reconnect, a live scan here would very likely just show a false "everyone is missing this"
+	-- reading, since the client's own aura data isn't ready yet at that point.
+	if GetTime() < RBS_ScanSuppressUntil then
+		GameTooltip:AddLine(" ")
+		GameTooltip:AddLine("Still syncing with the server -- try again in a few seconds.", 0.7, 0.7, 0.7)
+		GameTooltip:Show()
+		return
+	end
+
 	-- Soulstone gets its own tooltip shape (who has one active + which warlocks are free/on this
 	-- addon's approximate cooldown) instead of the normal "missing" list -- see RBS_ScanSoulstone.
 	if this.rbsDef.special == "soulstone" then
@@ -519,6 +548,16 @@ end
 -- just the local chat window if solo) listing who's missing it -- e.g. "Fortitude = Nydeh". A buff
 -- nobody is missing is skipped entirely rather than announcing "(nobody)" as spam.
 local function RBS_AnnounceMissing()
+	-- See RBS_ScanSuppressUntil's own comment (top of file) -- refuse to announce at all right after
+	-- a reconnect, rather than blasting the whole raid with a false "everyone is missing everything"
+	-- reading while the client's aura data is still catching up.
+	if GetTime() < RBS_ScanSuppressUntil then
+		DEFAULT_CHAT_FRAME:AddMessage(
+			"|cFF00CCFFRaidBuffStatus:|r Still syncing with the server -- try Announce again in a few seconds."
+		)
+		return
+	end
+
 	local channel = nil
 	if GetNumRaidMembers() > 0 then
 		channel = "RAID"
@@ -633,6 +672,12 @@ end
 -- computes its own fresh answer independently on hover, so this loop doesn't need to hand anything
 -- to it.
 function RBS_UpdateDashboard()
+	-- See RBS_ScanSuppressUntil's own comment (top of file) -- skip refreshing the missing-counts
+	-- entirely right after a reconnect rather than showing a false "everyone missing" reading; the
+	-- icons just keep showing whatever they last showed until real data is available again.
+	if GetTime() < RBS_ScanSuppressUntil then
+		return
+	end
 	for b = 1, table.getn(RBS_BUFF_LIST), 1 do
 		local btn = RBS_BuffIcons[b]
 		if btn then
@@ -696,14 +741,26 @@ local RBS_AUTOINVITE_KEYWORDS = { ["inv"] = true, ["invite"] = true, ["123"] = t
 -- the warning itself doesn't fire. Toggle with "/rbs tauntdebug".
 RBS_TauntDebug = false
 
-local RBS_MISS_PHRASES = {
-	RESIST = "was resisted",
-	IMMUNE = "failed -- target is immune",
-	MISS = "missed",
-	DODGE = "was dodged",
-	PARRY = "was parried",
-	EVADE = "was evaded",
-}
+-- Shared by BOTH taunt-fail detection paths below (2026-08-31, per the user: "pero si las 2
+-- funcionan? Van a dispararse 2 veces?") -- the combat-log path and the chat-text path are
+-- redundant by design (see the chat-text path's own comment), so the SAME real taunt failure could
+-- get caught by both within the same instant. A short debounce means only the first one to notice
+-- actually shows the alert/plays the sound; the second one within the window is silently dropped.
+local RBS_LastTauntFailAlert = 0
+local RBS_TAUNT_FAIL_DEBOUNCE = 2
+
+local function RBS_AnnounceTauntFail(target)
+	local now = GetTime()
+	if (now - RBS_LastTauntFailAlert) < RBS_TAUNT_FAIL_DEBOUNCE then
+		return
+	end
+	RBS_LastTauntFailAlert = now
+	local msg = "Your Taunt failed on " .. tostring(target or "target") .. "!"
+	-- CONFIRMED (2026-08-29, death warnings): RaidNotice_AddMessage/RaidWarningFrame don't exist on
+	-- this client -- UIErrorsFrame is the universally-present substitute.
+	pcall(UIErrorsFrame.AddMessage, UIErrorsFrame, msg, 1, 0.2, 0.2, 1, 6)
+	pcall(PlaySound, "RaidWarning")
+end
 
 local function RBS_OnCombatLog()
 	if not (arg10 and string.find(arg10, "Taunt", 1, true) and arg4 == UnitName("player")) then
@@ -719,14 +776,100 @@ local function RBS_OnCombatLog()
 	end
 
 	if arg2 == "SPELL_MISSED" and RaidBuffStatusConfig.TauntWarnings then
-		local missType = arg12 or "?"
-		local phrase = RBS_MISS_PHRASES[missType] or ("failed (" .. tostring(missType) .. ")")
-		local msg = "Your Taunt " .. phrase .. " on " .. tostring(arg7 or "target") .. "!"
-		-- CONFIRMED (2026-08-29, death warnings): RaidNotice_AddMessage/RaidWarningFrame don't exist
-		-- on this client -- this call was never actually exercised live (taunt testing was deferred),
-		-- so it's fixed here now rather than shipping a second copy of the exact same crash.
-		pcall(UIErrorsFrame.AddMessage, UIErrorsFrame, msg, 1, 0.2, 0.2, 1, 6)
-		pcall(PlaySound, "RaidWarning")
+		RBS_AnnounceTauntFail(arg7)
+	end
+end
+
+-- Second, independent detection path (2026-08-31): does NOT use COMBAT_LOG_EVENT_UNFILTERED for
+-- taunt-fail detection at all -- it uses the much older, universally-available
+-- CHAT_MSG_SPELL_SELF_DAMAGE chat-text event and plain Lua pattern matching against confirmed real
+-- game text ("Your Taunt failed. Chromatic Dragonspawn is immune." / "Your Taunt was resisted by
+-- Chromatic Dragonspawn."). Given the taunt-only, COMBAT_LOG_EVENT_UNFILTERED-based path above was
+-- NEVER actually confirmed to fire (taunt testing was deferred all last session), this chat-text
+-- path is likely the one that actually works in practice -- kept alongside the other rather than
+-- replacing it, same "redundant detection paths, whichever fires first wins" approach already used
+-- for Soulstone/cooldowns.
+local RBS_TAUNT_FAIL_PATTERNS = {
+	"Your Taunt was resisted by (.+)",
+	"(.+) is immune to your Taunt%.",
+	"Your Taunt failed%. (.+) is immune%.",
+	"Your Taunt missed (.+)", -- a real taunt-miss case is rare/unconfirmed -- kept anyway, harmless.
+}
+
+-- Native WoW chat icon escape sequences ({rt1}..{rt8}) -- render as the actual raid-target icon in
+-- chat, universally supported, no addon-side texture work needed. Index = GetRaidTargetIndex(unit).
+--
+-- Deliberately PLAIN escape sequences, no |cFFxxxxxx..|r color codes -- confirmed (2026-08-31,
+-- reported specifically on TurtleWoW by another addon's users) that SendChatMessage silently fails
+-- to send AT ALL when the message contains a hex color code AND the target has a raid mark set.
+-- Never add color codes to any string passed to SendChatMessage in this addon
+-- (DEFAULT_CHAT_FRAME:AddMessage, local-only, is unaffected).
+local RBS_RAID_MARK_ICONS = { "{rt1} ", "{rt2} ", "{rt3} ", "{rt4} ", "{rt5} ", "{rt6} ", "{rt7} ", "{rt8} " }
+
+-- Mocking Blow use-announce (2026-08-31, per the user): posts to raid/party chat when you use
+-- Mocking Blow, mentioning your current target's raid mark if it has one. Detects that the ability
+-- was USED (not a specific hit/miss outcome) via a plain substring match on the chat text, then
+-- separately reads whatever's currently targeted for the name/mark -- plus a short debounce since a
+-- single Mocking Blow use can generate more than one CHAT_MSG_SPELL_SELF_DAMAGE line (its own
+-- damage tick alongside any resist/miss text).
+local RBS_LastMockingBlowAnnounce = 0
+local RBS_MOCKING_BLOW_DEBOUNCE = 2
+
+local function RBS_AnnounceMockingBlow()
+	local now = GetTime()
+	if (now - RBS_LastMockingBlowAnnounce) < RBS_MOCKING_BLOW_DEBOUNCE then
+		return
+	end
+	RBS_LastMockingBlowAnnounce = now
+
+	local targetName = UnitName("target") or "target"
+	local markIndex = GetRaidTargetIndex("target")
+	local mark = (markIndex and RBS_RAID_MARK_ICONS[markIndex]) or ""
+	local msg = "Mocking Blow used on " .. mark .. targetName
+
+	local channel = nil
+	if GetNumRaidMembers() > 0 then
+		channel = "RAID"
+	elseif GetNumPartyMembers() > 0 then
+		channel = "PARTY"
+	end
+	if channel then
+		pcall(SendChatMessage, msg, channel)
+	else
+		DEFAULT_CHAT_FRAME:AddMessage("|cFF00CCFFRaidBuffStatus:|r " .. msg)
+	end
+end
+
+local function RBS_OnTauntChatMsg()
+	if not arg1 then
+		return
+	end
+
+	if RaidBuffStatusConfig.MockingBlowAnnounce and string.find(arg1, "Mocking Blow", 1, true) then
+		RBS_AnnounceMockingBlow()
+	end
+
+	for i = 1, table.getn(RBS_TAUNT_FAIL_PATTERNS), 1 do
+		local _, _, target = string.find(arg1, RBS_TAUNT_FAIL_PATTERNS[i])
+		if target then
+			-- Strip a trailing period some of these patterns leave attached to the captured name.
+			if string.find(target, "%.$") then
+				target = string.sub(target, 1, string.len(target) - 1)
+			end
+			if RBS_TauntDebug then
+				DEFAULT_CHAT_FRAME:AddMessage(
+					"|cFF00CCFFRaidBuffStatus taunt debug (chat):|r matched pattern " .. i .. ", target=" .. target
+				)
+			end
+			if RaidBuffStatusConfig.TauntWarnings then
+				RBS_AnnounceTauntFail(target)
+			end
+			return
+		end
+	end
+
+	if RBS_TauntDebug and string.find(arg1, "Taunt", 1, true) then
+		DEFAULT_CHAT_FRAME:AddMessage("|cFF00CCFFRaidBuffStatus taunt debug (chat):|r unmatched: \"" .. arg1 .. "\"")
 	end
 end
 
@@ -743,9 +886,105 @@ function RBS_OnEvent()
 	elseif event == "COMBAT_LOG_EVENT_UNFILTERED" then
 		RBS_OnCombatLog()
 		RBS_OnCombatLogCooldowns()
+		RBS_OnCombatLogSoulstone()
 	elseif event == "ADDON_LOADED" then
 		if arg1 == "RaidBuffStatus" then
 			RBS_OnAddonLoaded()
+		end
+	elseif event == "PLAYER_ENTERING_WORLD" then
+		RBS_ScanSuppressUntil = GetTime() + RBS_SCAN_SUPPRESS_SECONDS
+	elseif event == "CHAT_MSG_SPELL_SELF_DAMAGE" then
+		RBS_OnTauntChatMsg()
+	elseif event == "PLAYER_REGEN_DISABLED" then
+		if RaidBuffStatusConfig.FightStartMisses then
+			RBS_FightStartWindowUntil = GetTime() + (RaidBuffStatusConfig.FightStartMissesDuration or 8)
+		end
+	elseif event == "CHAT_MSG_COMBAT_SELF_MISSES" then
+		RBS_OnCombatSelfMiss()
+	end
+end
+
+------------------------------------------------------------------------------------------------------
+-- TANK UTILITIES (per the user, 2026-08-31): Salvation auto-removal and an early-fight miss/dodge/
+-- parry announce -- both independently toggleable, deliberately NOT bundled (along with the Mocking
+-- Blow announce above) under a single umbrella "mode" switch -- the user specifically asked for
+-- each function to be its own separate option.
+------------------------------------------------------------------------------------------------------
+
+-- Blessing of Salvation (1038) / Greater Blessing of Salvation (25895) -- confirmed spell IDs.
+-- Reduces threat generation, which is exactly what a tank does NOT want, so this cancels it the
+-- moment it's found on the local player. Deliberately does NOT gate on stance/talents first
+-- (Defensive Stance, Bear Form, Righteous Fury, Defensive Tactics+Shield, Rockbiter) -- it just
+-- removes Salvation outright whenever the option is on, since a full stance-aware decision tree is
+-- out of scope for a first pass, and the option itself is opt-in (turning it on already means
+-- "never put this on me").
+local RBS_SALVATION_IDS = { [1038] = true, [25895] = true }
+
+local function RBS_CheckSalvationRemoval()
+	if not RaidBuffStatusConfig.AutoRemoveSalvation then
+		return
+	end
+	local c = 0
+	while true do
+		local id = GetPlayerBuffID(c)
+		if not id then
+			break
+		end
+		if RBS_SALVATION_IDS[id] then
+			pcall(CancelPlayerBuff, c)
+			break
+		end
+		c = c + 1
+	end
+end
+
+-- For a short window after entering combat, the local player's own melee swing results against
+-- their target are announced to raid/party chat -- lets the raid know threat might not be
+-- established yet (several dodges/parries/misses right at pull) without anyone needing to watch the
+-- tank's own combat log. Patterns are confirmed real game text read via CHAT_MSG_COMBAT_SELF_MISSES.
+local RBS_FIGHT_START_MISS_PATTERNS = {
+	"You miss (.+)%.",
+	"You attack%. (.+) dodges%.",
+	"You attack%. (.+) parries%.",
+	"You attack but (.+) is immune%.",
+}
+local RBS_FIGHT_START_MISS_PHRASES = {
+	"Miss on %s!",
+	"%s dodged!",
+	"%s parried!",
+	"%s is immune!",
+}
+RBS_FightStartWindowUntil = 0
+
+-- Global, NOT local (2026-08-31): dispatched from RBS_OnEvent, which is defined EARLIER in this
+-- file -- same ordering rule as RBS_OnCombatLogCooldowns/RBS_OnCombatLogSoulstone above.
+function RBS_OnCombatSelfMiss()
+	if not RaidBuffStatusConfig.FightStartMisses then
+		return
+	end
+	if GetTime() > RBS_FightStartWindowUntil then
+		return
+	end
+	if not arg1 then
+		return
+	end
+
+	for i = 1, table.getn(RBS_FIGHT_START_MISS_PATTERNS), 1 do
+		local _, _, target = string.find(arg1, RBS_FIGHT_START_MISS_PATTERNS[i])
+		if target then
+			local msg = string.format(RBS_FIGHT_START_MISS_PHRASES[i], target)
+			local channel = nil
+			if GetNumRaidMembers() > 0 then
+				channel = "RAID"
+			elseif GetNumPartyMembers() > 0 then
+				channel = "PARTY"
+			end
+			if channel then
+				pcall(SendChatMessage, msg, channel)
+			else
+				DEFAULT_CHAT_FRAME:AddMessage("|cFF00CCFFRaidBuffStatus:|r " .. msg)
+			end
+			return
 		end
 	end
 end
@@ -1003,6 +1242,26 @@ local function RBS_GroupMemberClass(name)
 	return nil
 end
 
+-- Added 2026-08-30 after real raid testing confirmed the bug: a warlock who threw a Soulstone kept
+-- showing as "available" indefinitely, never entering the addon's own 30-minute cooldown. The
+-- existing detection (RBS_ScanSoulstone below) relies entirely on the aura tooltip's "Cast by:"
+-- line, which was only ever independently confirmed present when hovering a buff on the LOCAL
+-- PLAYER's own tooltip (pfUI's action-bar tooltip, for Fortitude) -- it may simply not exist at all
+-- when scanning ANOTHER raid member's aura via SetUnitBuff on a non-"player" unit, which is exactly
+-- how Soulstone is scanned. This adds a SECOND, independent detection path that doesn't need that
+-- line at all: Soulstone Resurrection targets another player (unlike a pure self-buff), and the
+-- combat log has been separately confirmed to fire reliably for that category of cast (SPELL_HEAL,
+-- via ShaguTweaks) even though it's confirmed NOT to fire for plain self-buffs (Evasion). The two
+-- paths are redundant by design, not a replacement for one another -- whichever notices the cast
+-- first sets the same RBS_SoulstoneCooldownUntil table.
+function RBS_OnCombatLogSoulstone()
+	if arg2 == "SPELL_CAST_SUCCESS" and arg10 == "Soulstone Resurrection" then
+		if RBS_GroupMemberClass(arg4) == "Warlock" then
+			RBS_SoulstoneCooldownUntil[arg4] = GetTime() + RBS_SOULSTONE_COOLDOWN_SECONDS
+		end
+	end
+end
+
 -- Starts a cooldown in BOTH clock domains at once (2026-08-30, per the user): `RBS_CDState` (this
 -- session's live display, keyed the same way, valued in GetTime() -- required by
 -- CooldownFrame_SetTimer's own radial-swipe math, and already correct across a plain /reload since
@@ -1094,6 +1353,11 @@ RBS_CDBuffHadIt = {}
 -- whoever cast it -- immediately for `selfOnly` entries (the buffed unit IS the caster), otherwise
 -- via the aura tooltip's "Cast by" line.
 function RBS_ScanCDBuffs()
+	-- See RBS_ScanSuppressUntil's own comment (top of file) -- same reasoning as RBS_UpdateDashboard.
+	if GetTime() < RBS_ScanSuppressUntil then
+		return
+	end
+
 	local track = RaidBuffStatusConfig.CDTrack or {}
 
 	local function checkUnit(unit)
@@ -1417,6 +1681,10 @@ function RBS_OnAddonLoaded()
 	if RaidBuffStatusConfig.CDShowLabels == nil then
 		RaidBuffStatusConfig.CDShowLabels = true
 	end
+	RaidBuffStatusConfig.MockingBlowAnnounce = RaidBuffStatusConfig.MockingBlowAnnounce or false
+	RaidBuffStatusConfig.AutoRemoveSalvation = RaidBuffStatusConfig.AutoRemoveSalvation or false
+	RaidBuffStatusConfig.FightStartMisses = RaidBuffStatusConfig.FightStartMisses or false
+	RaidBuffStatusConfig.FightStartMissesDuration = RaidBuffStatusConfig.FightStartMissesDuration or 8
 	RaidBuffStatusConfig.CDTrack = RaidBuffStatusConfig.CDTrack or {}
 	for i = 1, table.getn(RBS_CD_LIST), 1 do
 		local id = RBS_CD_LIST[i].id
@@ -1452,6 +1720,10 @@ function RBS_OnLoad()
 	this:RegisterEvent("CHAT_MSG_WHISPER")
 	this:RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED")
 	this:RegisterEvent("ADDON_LOADED")
+	this:RegisterEvent("PLAYER_ENTERING_WORLD")
+	this:RegisterEvent("CHAT_MSG_SPELL_SELF_DAMAGE")
+	this:RegisterEvent("CHAT_MSG_COMBAT_SELF_MISSES")
+	this:RegisterEvent("PLAYER_REGEN_DISABLED")
 	-- CONFIRMED via Holyward's own tracker-resize grip (Holyward.lua, proven working on this exact
 	-- client): the XML `resizable="true"` attribute alone was NOT enough there either -- an explicit
 	-- SetResizable(true) call is what actually flags the frame resizable on this client.
@@ -1570,6 +1842,57 @@ function RBS_OnLoad()
 			)
 			return
 		end
+		-- "/rbs auradump <name>" (2026-08-30, after real raid testing found Flask.Missing wrongly
+		-- listing people who confirmed they had one active): dumps EVERY aura C_UnitAuras.
+		-- GetAuraDataByIndex reports for that exact raid/party member, in order, straight to chat.
+		-- RBS_ScanBuff's "Flask" match is a plain substring against every aura's name, so if the
+		-- flask genuinely isn't in this dump, the bug is upstream of this addon (the API itself not
+		-- exposing that far into another unit's aura list yet) rather than a matching-logic bug here.
+		if string.find(msg, "^auradump", 1) then
+			local name = string.gsub(msg, "^auradump%s*", "")
+			local unit = nil
+			if name == "" then
+				unit = "target"
+			elseif name == UnitName("player") then
+				unit = "player"
+			elseif GetNumRaidMembers() > 0 then
+				for i = 1, GetNumRaidMembers(), 1 do
+					if UnitName("raid" .. i) == name then
+						unit = "raid" .. i
+						break
+					end
+				end
+			else
+				for i = 1, GetNumPartyMembers(), 1 do
+					if UnitName("party" .. i) == name then
+						unit = "party" .. i
+						break
+					end
+				end
+			end
+			if not unit or not UnitExists(unit) then
+				DEFAULT_CHAT_FRAME:AddMessage(
+					"|cFF00CCFFRaidBuffStatus:|r no current raid/party member named \"" .. name .. "\" (or no target, if no name given)."
+				)
+				return
+			end
+			DEFAULT_CHAT_FRAME:AddMessage(
+				"|cFF00CCFFRaidBuffStatus:|r auras on " .. tostring(UnitName(unit)) .. " (" .. unit .. "):"
+			)
+			local index = 1
+			local count = 0
+			while true do
+				local ok, aura = pcall(C_UnitAuras.GetAuraDataByIndex, unit, index, "HELPFUL")
+				if not ok or not aura then
+					break
+				end
+				count = count + 1
+				DEFAULT_CHAT_FRAME:AddMessage("  " .. index .. ": " .. tostring(aura.name))
+				index = index + 1
+			end
+			DEFAULT_CHAT_FRAME:AddMessage("  (" .. count .. " total)")
+			return
+		end
 		if msg == "debug" then
 			for b = 1, table.getn(RBS_BUFF_LIST), 1 do
 				local def = RBS_BUFF_LIST[b]
@@ -1674,6 +1997,9 @@ function RBS_OnUpdate()
 	if (curTime - RBS_LastDeathCheck) >= RBS_DEATH_CHECK_INTERVAL then
 		RBS_LastDeathCheck = curTime
 		RBS_CheckDeaths()
+		-- Salvation removal rides the same 1s cadence -- also independent of Enabled, since it's a
+		-- tank safety feature that should keep working whether or not the dashboard window is shown.
+		RBS_CheckSalvationRemoval()
 	end
 
 	-- Cooldowns no longer ticks from here (2026-08-30) -- it has its own OnUpdate on

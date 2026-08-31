@@ -310,6 +310,9 @@ local function CreateHealersTab()
 	}
 end
 
+-- Mocking Blow / Salvation removal / fight-start misses (2026-08-31), per the user's own explicit
+-- request: each is its OWN independent toggle, deliberately not bundled under one umbrella
+-- "mode" switch.
 local function CreateTanksTab()
 	return {
 		name = "Tanks",
@@ -324,6 +327,51 @@ local function CreateTanksTab()
 				end,
 				set = function(info, value)
 					RaidBuffStatusConfig.TauntWarnings = value
+				end,
+			},
+			mockingBlowAnnounce = {
+				type = "toggle", order = 2, width = "full",
+				name = "Mocking Blow use-announce",
+				desc = "Posts to raid/party chat whenever you use Mocking Blow, naming your current target (with its raid mark, if any).",
+				get = function()
+					return RaidBuffStatusConfig.MockingBlowAnnounce
+				end,
+				set = function(info, value)
+					RaidBuffStatusConfig.MockingBlowAnnounce = value
+				end,
+			},
+			autoRemoveSalvation = {
+				type = "toggle", order = 3, width = "full",
+				name = "Auto-remove Blessing of Salvation",
+				desc = "Immediately cancels Blessing of Salvation / Greater Blessing of Salvation on yourself the moment it's detected -- it reduces threat generation, which a tank never wants.",
+				get = function()
+					return RaidBuffStatusConfig.AutoRemoveSalvation
+				end,
+				set = function(info, value)
+					RaidBuffStatusConfig.AutoRemoveSalvation = value
+				end,
+			},
+			fightStartMisses = {
+				type = "toggle", order = 4, width = "full",
+				name = "Announce misses at fight start",
+				desc = "For a short window after entering combat, posts your own melee misses/dodges/parries against your target to raid/party chat -- an early warning that threat isn't established yet.",
+				get = function()
+					return RaidBuffStatusConfig.FightStartMisses
+				end,
+				set = function(info, value)
+					RaidBuffStatusConfig.FightStartMisses = value
+				end,
+			},
+			fightStartMissesDuration = {
+				type = "range", order = 5, width = "full",
+				name = "Fight-start window (seconds)",
+				desc = "How many seconds after entering combat the miss/dodge/parry announce above stays active.",
+				min = 3, max = 20, step = 1,
+				get = function()
+					return RaidBuffStatusConfig.FightStartMissesDuration
+				end,
+				set = function(info, value)
+					RaidBuffStatusConfig.FightStartMissesDuration = value
 				end,
 			},
 		},
