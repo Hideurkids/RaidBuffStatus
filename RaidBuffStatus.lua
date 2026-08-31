@@ -27,12 +27,17 @@ RaidBuffStatusConfig.IconSize = RaidBuffStatusConfig.IconSize or 28
 RaidBuffStatusConfig.AutoInvite = RaidBuffStatusConfig.AutoInvite or false
 RaidBuffStatusConfig.DeathWarnings = RaidBuffStatusConfig.DeathWarnings or false
 RaidBuffStatusConfig.TauntWarnings = RaidBuffStatusConfig.TauntWarnings or false
+RaidBuffStatusConfig.CDEnabled = RaidBuffStatusConfig.CDEnabled or false
+RaidBuffStatusConfig.CDIconSize = RaidBuffStatusConfig.CDIconSize or 20
+if RaidBuffStatusConfig.CDShowLabels == nil then
+	RaidBuffStatusConfig.CDShowLabels = true
+end
 
 -- Bumped on every meaningful rewrite so a load-message screenshot can confirm which build is
 -- actually running, without having to ask the user to check -- also flags whether a stale/second
 -- copy of this addon (e.g. a leftover install of the old reference folder reusing the same global
 -- names) might be clobbering these functions after this file loads.
-RBS_BUILD = "v31-uierrors-taunt-selfresist"
+RBS_BUILD = "v44-soulstone-announce"
 
 ------------------------------------------------------------------------------------------------------
 -- BUFF LIST
@@ -189,6 +194,16 @@ local RBS_SoulstoneCooldownUntil = {} -- [warlockName] = GetTime() value when th
 -- Hidden scanning tooltip, used ONLY for this one case -- C_UnitAuras.GetAuraDataByIndex (used
 -- everywhere else in this addon) doesn't expose a caster name on this client, but a real GameTooltip
 -- fed the same aura does show a "Cast by: <name>" line.
+--
+-- SUSPECTED (2026-08-30, per the user: a warlock who used Soulstone never shows on cooldown, stays
+-- "available" forever) that this "Cast by:" line only exists on THIS client when hovering a buff on
+-- the LOCAL PLAYER's own tooltip -- the original confirmation for this line's existence (pfUI's
+-- action-bar tooltip, Fortitude) may have only ever been tested that way. If it's simply absent when
+-- scanning ANOTHER raid member's aura via SetUnitBuff on a non-"player" unit, RBS_SoulstoneTipCaster
+-- silently returns nil every time and the cooldown never starts -- indistinguishable from working
+-- code without seeing the raw tooltip content. RBS_SSDebug ("/rbs ssdebug") dumps every line so this
+-- can be confirmed instead of guessed at.
+RBS_SSDebug = false
 local RBS_SoulstoneTip = nil
 local function RBS_SoulstoneTipCaster(unit, index)
 	if not RBS_SoulstoneTip then
@@ -197,17 +212,24 @@ local function RBS_SoulstoneTipCaster(unit, index)
 	end
 	RBS_SoulstoneTip:ClearLines()
 	RBS_SoulstoneTip:SetUnitBuff(unit, index)
+	local found = nil
 	for i = 1, 8, 1 do
 		local line = getglobal("RaidBuffStatusSoulstoneTipTextLeft" .. i)
 		if not line then
 			break
 		end
 		local text = line:GetText()
-		if text and string.find(text, "Cast by: ", 1, true) then
-			return string.sub(text, string.len("Cast by: ") + 1)
+		if RBS_SSDebug and text then
+			DEFAULT_CHAT_FRAME:AddMessage("|cFF00CCFFRaidBuffStatus SS debug:|r line " .. i .. " = \"" .. text .. "\"")
+		end
+		if not found and text and string.find(text, "Cast by: ", 1, true) then
+			found = string.sub(text, string.len("Cast by: ") + 1)
+			if not RBS_SSDebug then
+				return found
+			end
 		end
 	end
-	return nil
+	return found
 end
 
 -- Returns: holders (names currently carrying an active Soulstone), warlocks (one entry per raid/
@@ -506,20 +528,53 @@ local function RBS_AnnounceMissing()
 
 	for b = 1, table.getn(RBS_BUFF_LIST), 1 do
 		local def = RBS_BUFF_LIST[b]
-		local missing = RBS_ScanBuff(def)
-		local missingCount = table.getn(missing)
-		if missingCount > 0 then
-			local list
-			if missingCount > RBS_ANNOUNCE_MAX_NAMES then
-				list = "Too many!"
-			else
-				list = RBS_JoinNames(missing)
+		if def.special == "soulstone" then
+			-- Soulstone gets its own announce shape (2026-08-30, per the user): RBS_ScanBuff's
+			-- ordinary "missing" semantics don't apply (not everyone is supposed to have one), but
+			-- "how many warlocks are free and haven't thrown theirs yet" is genuinely useful raid
+			-- info, so it gets a dedicated line instead of being skipped outright.
+			local _, warlocks = RBS_ScanSoulstone()
+			local availableNames = {}
+			for w = 1, table.getn(warlocks), 1 do
+				if warlocks[w].remaining <= 0 then
+					table.insert(availableNames, warlocks[w].name)
+				end
 			end
-			local line = def.label .. " = " .. list
-			if channel then
-				SendChatMessage(line, channel)
-			else
-				DEFAULT_CHAT_FRAME:AddMessage("|cFF00CCFFRaidBuffStatus:|r " .. line)
+			local availableCount = table.getn(availableNames)
+			if availableCount > 0 then
+				local list
+				if availableCount > RBS_ANNOUNCE_MAX_NAMES then
+					list = "Too many!"
+				else
+					list = RBS_JoinNames(availableNames)
+				end
+				local plural = ""
+				if availableCount > 1 then
+					plural = "s"
+				end
+				local line = availableCount .. " Soulstone" .. plural .. " not assigned yet: " .. list
+				if channel then
+					SendChatMessage(line, channel)
+				else
+					DEFAULT_CHAT_FRAME:AddMessage("|cFF00CCFFRaidBuffStatus:|r " .. line)
+				end
+			end
+		else
+			local missing = RBS_ScanBuff(def)
+			local missingCount = table.getn(missing)
+			if missingCount > 0 then
+				local list
+				if missingCount > RBS_ANNOUNCE_MAX_NAMES then
+					list = "Too many!"
+				else
+					list = RBS_JoinNames(missing)
+				end
+				local line = def.label .. " = " .. list
+				if channel then
+					SendChatMessage(line, channel)
+				else
+					DEFAULT_CHAT_FRAME:AddMessage("|cFF00CCFFRaidBuffStatus:|r " .. line)
+				end
 			end
 		end
 	end
@@ -667,8 +722,11 @@ local function RBS_OnCombatLog()
 		local missType = arg12 or "?"
 		local phrase = RBS_MISS_PHRASES[missType] or ("failed (" .. tostring(missType) .. ")")
 		local msg = "Your Taunt " .. phrase .. " on " .. tostring(arg7 or "target") .. "!"
-		RaidNotice_AddMessage(RaidWarningFrame, msg, ChatTypeInfo["RAID_WARNING"])
-		PlaySound("RaidWarning")
+		-- CONFIRMED (2026-08-29, death warnings): RaidNotice_AddMessage/RaidWarningFrame don't exist
+		-- on this client -- this call was never actually exercised live (taunt testing was deferred),
+		-- so it's fixed here now rather than shipping a second copy of the exact same crash.
+		pcall(UIErrorsFrame.AddMessage, UIErrorsFrame, msg, 1, 0.2, 0.2, 1, 6)
+		pcall(PlaySound, "RaidWarning")
 	end
 end
 
@@ -684,6 +742,11 @@ function RBS_OnEvent()
 		end
 	elseif event == "COMBAT_LOG_EVENT_UNFILTERED" then
 		RBS_OnCombatLog()
+		RBS_OnCombatLogCooldowns()
+	elseif event == "ADDON_LOADED" then
+		if arg1 == "RaidBuffStatus" then
+			RBS_OnAddonLoaded()
+		end
 	end
 end
 
@@ -751,6 +814,636 @@ local function RBS_CheckDeaths()
 end
 
 ------------------------------------------------------------------------------------------------------
+-- RAID COOLDOWN TRACKER (per the user's request, 2026-08-30) -- Innervate, Battle Rez,
+-- Bloodlust/Heroism, Spirit Link Totem, Ascendance, etc.
+--
+-- Explicitly does NOT require anyone else in the raid to run this addon. The reference addon RAT
+-- (C:\Users\Felix\Desktop\HolyWrath\RAT-master\Rat.lua) only works raid-wide because every relevant
+-- class member runs it themselves and reads their OWN spellbook cooldown via GetSpellCooldown(),
+-- then broadcasts it with SendAddonMessage("RATSYNC...") -- confirmed by reading its getSpells()/
+-- sendCds()/Rat:AddCd() functions. That's the same "no API exposes another player's cooldown" wall
+-- already hit and accepted for Soulstone tracking above, and it's exactly the dependency the user
+-- asked to avoid.
+--
+-- Detection is the Soulstone technique generalized: watch COMBAT_LOG_EVENT_UNFILTERED for a
+-- SPELL_CAST_SUCCESS whose spell name (arg10) exactly matches a tracked ability and whose caster
+-- (arg4) is a CURRENT raid/party member of the right class, then start THIS ADDON'S OWN cooldown
+-- timer for that (ability, caster) pair. Same accepted limitation as Soulstone: only casts this
+-- client actually witnesses this session are tracked -- a cooldown already in progress before
+-- login/joining the group reads as "ready" until the next real cast.
+--
+-- NOT YET CONFIRMED on this client: whether "SPELL_CAST_SUCCESS" is the right subevent name for a
+-- beneficial, non-damage cast like Innervate (only SPELL_HEAL, via ShaguTweaks, and tentatively
+-- SPELL_MISSED for the taunt feature above, are confirmed so far). Several spellName/cooldown
+-- values below are also placeholders, not verified against this exact server's tooltips -- see the
+-- per-entry comments. "/rbs cddebug" prints the raw combat-log args for anything matching a tracked
+-- spell name so both can be corrected from real in-game testing.
+------------------------------------------------------------------------------------------------------
+
+-- Global (not local): RaidBuffStatusOptions.lua reads this to build one checkbox per ability.
+--
+-- `buffName` (2026-08-30): CONFIRMED that COMBAT_LOG_EVENT_UNFILTERED does NOT reliably fire for a
+-- plain self-buff cast on this client -- Nydeh casting Evasion produced zero combat-log events at
+-- all (verified with the broadened /rbs cddebug, which prints EVERY event where the local player is
+-- the source, not just ones matching a guessed spell name), even though it clearly landed (visible
+-- in the default Combat Log chat tab as "Nydeh gains Evasion."). Any ability whose cast leaves a
+-- scannable AURA is now detected the same proven way Soulstone already is above: RBS_ScanCDBuffs
+-- walks the raid/party roster's own buffs via C_UnitAuras.GetAuraDataByIndex (exactly like
+-- RBS_ScanBuff), and reacts to the "wasn't there last scan, is there now" transition. `buffName` is
+-- the aura's own name if it's set (defaults to `spellName` would be wrong for e.g. Vanish, so it's
+-- always spelled out explicitly here, never inferred). `selfOnly = true` means the buff can only
+-- ever appear on the person who cast it (Evasion, Berserker Rage, Divine Shield, Shield Wall), so
+-- the caster IS just whoever the buff appeared on -- no further lookup needed. Without
+-- `selfOnly`, the buff can land on someone OTHER than the caster (Innervate on your target,
+-- Blessing of Protection on an ally, Bloodlust/Heroism/Mana Tide/Spirit Link on the whole raid), so
+-- the caster is resolved via the aura tooltip's "Cast by" line -- the same trick already proven for
+-- Soulstone (RBS_SoulstoneTipCaster), generalized here as RBS_CDTipCaster. Combat log detection
+-- (RBS_OnCombatLogCooldowns above) is NOT removed for entries that also have a `buffName` -- it's
+-- effectively a no-op for those given today's finding, but harmless to leave running in case it
+-- turns out to work for some subevent/ability combination not yet tested. Abilities with NO
+-- `buffName` here (Rebirth, Ascendance, Lightwell, taunts, interrupts, Lay on Hands, Divine
+-- Intervention, Reincarnation, Tranquilizing Shot) either don't leave a clean scannable aura at all,
+-- or (Vanish specifically) leave one ("Stealth") that's indistinguishable from an unrelated, far
+-- more common ability (plain Stealth) -- see VANISH's own comment below.
+RBS_CD_LIST = {
+	-- Confirmed vanilla spell name + icon (mined from RAT's own cdtbl); 6 min is vanilla's real base
+	-- cooldown.
+	{ id = "INNERVATE",  label = "Innervate",         icon = "Interface\\Icons\\Spell_Nature_Lightning",     class = "Druid",  spellName = "Innervate",         buffName = "Innervate",         cooldown = 6 * 60 },
+	-- UNCONFIRMED: vanilla Rebirth has no real spell cooldown, only a reagent requirement -- a
+	-- distinct timed "Battle Rez" is likely a TWoW/OctoWoW-specific talent/spell change. spellName
+	-- and cooldown here are placeholders pending an in-game tooltip check. Icon reused from RAT's
+	-- own Rebirth/Reincarnation entry. No buffName -- a resurrection doesn't leave a clean aura to
+	-- scan for on either the caster or the target.
+	{ id = "BATTLEREZ",  label = "Battle Rez",        icon = "Interface\\Icons\\Spell_Nature_Reincarnation", class = "Druid",  spellName = "Rebirth",           cooldown = 30 * 60 },
+	-- Bloodlust (Horde) / Heroism (Alliance, a TWoW cross-faction addition) share the same icon in
+	-- every era of Blizzard's own data.
+	{ id = "BLOODLUST",  label = "Bloodlust",         icon = "Interface\\Icons\\Spell_Nature_BloodLust",     class = "Shaman", spellName = "Bloodlust",         buffName = "Bloodlust",         cooldown = 10 * 60 },
+	{ id = "HEROISM",    label = "Heroism",           icon = "Interface\\Icons\\Spell_Nature_BloodLust",     class = "Shaman", spellName = "Heroism",           buffName = "Heroism",           cooldown = 10 * 60 },
+	-- UNCONFIRMED: not a vanilla-era ability (added in Wrath) -- spellName/cooldown/icon/buffName are
+	-- all placeholders for whatever TWoW/OctoWoW's own version of this is.
+	{ id = "SPIRITLINK", label = "Spirit Link Totem", icon = "Interface\\Icons\\Spell_Nature_SpiritLink",    class = "Shaman", spellName = "Spirit Link Totem", buffName = "Spirit Link Totem", cooldown = 3 * 60 },
+	-- UNCONFIRMED: "Ascendance" isn't a vanilla Priest ability -- almost certainly a TWoW/OctoWoW
+	-- class-change talent. spellName/cooldown/icon are all placeholders.
+	{ id = "ASCENDANCE", label = "Ascendance",        icon = "Interface\\Icons\\Spell_Shadow_Shadowform",    class = "Priest", spellName = "Ascendance",        cooldown = 3 * 60 },
+	-- UNCONFIRMED: Lightwell is a TBC-era Holy Priest talent, not vanilla -- likely present here via
+	-- the same kind of TWoW/OctoWoW class change as Ascendance above. spellName/cooldown/icon are
+	-- all placeholders (real retail cooldown is 3 min base, reduced by the Tranquil Spirit talent --
+	-- used as the estimate here since there's nothing more specific to go on for this server).
+	{ id = "LIGHTWELL",  label = "Lightwell",         icon = "Interface\\Icons\\Spell_Holy_SummonLightwell", class = "Priest", spellName = "Lightwell",         cooldown = 3 * 60 },
+
+	-- Everything below is mined from RAT (C:\Users\Felix\Desktop\HolyWrath\RAT-master\Rat.lua) --
+	-- per the user (2026-08-30), RAT itself is a TurtleWoW addon, not generic vanilla, so these exact
+	-- spellName strings and icon paths are confirmed real/castable on this server (RAT's own
+	-- per-class checkbox list, mined via its CreateFrame("CheckButton", "<Name>", self.<Class>, ...)
+	-- calls). What RAT does NOT confirm is any of the cooldown DURATIONS below -- it never hardcodes
+	-- them, it reads each one live from the local player's own GetSpellCooldown() at the moment they
+	-- open their own options panel, so it works regardless of this server's actual values. Every
+	-- `cooldown` field here is still my own vanilla-baseline estimate, unconfirmed against an actual
+	-- in-game tooltip on this server -- use /rbs cddebug to check the real numbers once tested.
+	{ id = "SHIELDWALL",        label = "Shield Wall",           icon = "Interface\\Icons\\Ability_Warrior_ShieldWall",     class = "Warrior", spellName = "Shield Wall",           buffName = "Shield Wall", selfOnly = true, cooldown = 30 * 60 },
+	{ id = "CHALLENGINGSHOUT",  label = "Challenging Shout",     icon = "Interface\\Icons\\Ability_BullRush",               class = "Warrior", spellName = "Challenging Shout",     cooldown = 10 * 60 },
+	{ id = "BERSERKERRAGE",     label = "Berserker Rage",        icon = "Interface\\Icons\\Spell_Nature_AncestralGuardian", class = "Warrior", spellName = "Berserker Rage",        buffName = "Berserker Rage", selfOnly = true, cooldown = 30 },
+	{ id = "PUMMEL",            label = "Pummel",                icon = "Interface\\Icons\\INV_Gauntlets_04",               class = "Warrior", spellName = "Pummel",                cooldown = 10 },
+	{ id = "DISARM",            label = "Disarm",                icon = "Interface\\Icons\\Ability_Warrior_Disarm",         class = "Warrior", spellName = "Disarm",                cooldown = 60 },
+	{ id = "LAYONHANDS",        label = "Lay on Hands",          icon = "Interface\\Icons\\Spell_Holy_LayOnHands",          class = "Paladin", spellName = "Lay on Hands",          cooldown = 60 * 60 },
+	{ id = "BOP",               label = "Blessing of Protection",icon = "Interface\\Icons\\Spell_Holy_SealOfProtection",    class = "Paladin", spellName = "Blessing of Protection",buffName = "Blessing of Protection", cooldown = 5 * 60 },
+	-- Icon paths for these two are exactly as RAT itself has them (Divine Shield -> the
+	-- "DivineIntervention" texture, Divine Intervention -> the "TimeStop" texture) -- an odd-looking
+	-- swap, but taken verbatim from a working, server-specific reference rather than "corrected"
+	-- from memory.
+	{ id = "DIVINESHIELD",      label = "Divine Shield",         icon = "Interface\\Icons\\Spell_Holy_DivineIntervention",  class = "Paladin", spellName = "Divine Shield",         buffName = "Divine Shield", selfOnly = true, cooldown = 5 * 60 },
+	{ id = "DIVINEINTERVENTION",label = "Divine Intervention",   icon = "Interface\\Icons\\Spell_Nature_TimeStop",          class = "Paladin", spellName = "Divine Intervention",   cooldown = 60 * 60 },
+	{ id = "CHALLENGINGROAR",   label = "Challenging Roar",      icon = "Interface\\Icons\\Ability_Druid_ChallangingRoar",  class = "Druid",   spellName = "Challenging Roar",      cooldown = 10 * 60 },
+	{ id = "MANATIDE",          label = "Mana Tide Totem",       icon = "Interface\\Icons\\Spell_Frost_SummonWaterElemental",class = "Shaman",  spellName = "Mana Tide Totem",       buffName = "Mana Tide Totem", cooldown = 5 * 60 },
+	{ id = "REINCARNATION",     label = "Reincarnation",         icon = "Interface\\Icons\\Spell_Nature_Reincarnation",     class = "Shaman",  spellName = "Reincarnation",         cooldown = 30 * 60 },
+	-- UNCONFIRMED even that this HAS a meaningful spell cooldown at all in vanilla-era data (it may
+	-- just be gated by the hunter's normal ranged attack timer, not a real cooldown) -- RAT tracked
+	-- it anyway via the same generic GetSpellCooldown() call, so included for parity; likely the
+	-- first one to just show "0:00"/never trigger if it turns out to have no real cooldown here.
+	{ id = "TRANQSHOT",         label = "Tranquilizing Shot",    icon = "Interface\\Icons\\Spell_Nature_Drowsy",            class = "Hunter",  spellName = "Tranquilizing Shot",    cooldown = 6 },
+	{ id = "KICK",              label = "Kick",                  icon = "Interface\\Icons\\Ability_Kick",                   class = "Rogue",   spellName = "Kick",                  cooldown = 10 },
+	-- Not from RAT or the user's original list -- added 2026-08-30 specifically so Nydeh (a Rogue)
+	-- can be used to test the whole detection pipeline end-to-end, since Vanish is a real, unchanged
+	-- vanilla ability (unlike Ascendance/Lightwell/Spirit Link/Battle Rez above, which are all
+	-- guesses because they aren't vanilla at all) -- spellName and icon should both be exact.
+	-- Deliberately NO buffName: Vanish grants the "Stealth" buff, but that's the exact same buff the
+	-- ordinary (no-cooldown, spammable in and out of combat) Stealth ability grants -- aura-scanning
+	-- for "Stealth" would treat every routine stealth as a Vanish cast, which is worse than not
+	-- tracking Vanish at all. Combat log is genuinely the only clean option here, confirmed-broken
+	-- as that currently is for a plain self-buff.
+	{ id = "VANISH",            label = "Vanish",                icon = "Interface\\Icons\\Ability_Vanish",                 class = "Rogue",   spellName = "Vanish",                cooldown = 5 * 60 },
+	-- Same reasoning as Vanish above -- a real, unchanged vanilla ability, added for testing with
+	-- Nydeh. Vanilla base cooldown is 5 min. Unlike Vanish, Evasion's own buff name doesn't collide
+	-- with anything else, so aura-scan detection works cleanly here.
+	{ id = "EVASION",           label = "Evasion",               icon = "Interface\\Icons\\Ability_Evasion",                class = "Rogue",   spellName = "Evasion",               buffName = "Evasion", selfOnly = true, cooldown = 5 * 60 },
+	-- Major Soulstone is deliberately NOT duplicated here -- it's already tracked above in
+	-- RBS_BUFF_LIST (the "SOULSTONE" special entry), via aura-scan + the aura tooltip's "Cast by"
+	-- line, which is more accurate than a bare cast-name match would be here.
+}
+
+-- RaidBuffStatusConfig.CDTrack[id] = true/false, one per-ability checkbox on the Cooldowns options
+-- tab. Backfills any id missing from an existing saved config (fresh install or a config saved
+-- before this feature existed).
+RaidBuffStatusConfig.CDTrack = RaidBuffStatusConfig.CDTrack or {}
+for RBS_cdInit = 1, table.getn(RBS_CD_LIST), 1 do
+	local RBS_cdInitId = RBS_CD_LIST[RBS_cdInit].id
+	if RaidBuffStatusConfig.CDTrack[RBS_cdInitId] == nil then
+		RaidBuffStatusConfig.CDTrack[RBS_cdInitId] = true
+	end
+end
+
+RBS_CDDebug = false
+
+-- ["ID|CasterName"] = GetTime() value the cooldown ends. Global for the same cross-function-
+-- visibility reason as RBS_BuffIcons/RBS_HeaderBuilt above.
+RBS_CDState = {}
+RBS_CDRows = {}
+RBS_CDNeedsBuild = false
+local RBS_CD_MAX_ROWS = 12
+local RBS_CD_ROW_GAP = 2
+-- Renamed in spirit but not in name to keep this diff small: with no title bar anymore (see
+-- RBS_CreateCDFrame), this is just a small top padding instead of "room for the title text".
+local RBS_CD_TITLE_H = 2
+
+-- Returns the class of a CURRENT raid/party member with this exact name, or nil if nobody in the
+-- group has that name -- both "is this actually someone in my group" and "what class are they"
+-- (an extra guard against a same-named NPC/mob spell) come from one roster walk.
+local function RBS_GroupMemberClass(name)
+	if not name then
+		return nil
+	end
+	if name == UnitName("player") then
+		local ok, class = pcall(UnitClass, "player")
+		if ok then
+			return class
+		end
+		return nil
+	end
+	if GetNumRaidMembers() > 0 then
+		for i = 1, GetNumRaidMembers(), 1 do
+			local unit = "raid" .. i
+			if UnitName(unit) == name then
+				local ok, class = pcall(UnitClass, unit)
+				if ok then
+					return class
+				end
+			end
+		end
+	else
+		for i = 1, GetNumPartyMembers(), 1 do
+			local unit = "party" .. i
+			if UnitName(unit) == name then
+				local ok, class = pcall(UnitClass, unit)
+				if ok then
+					return class
+				end
+			end
+		end
+	end
+	return nil
+end
+
+-- Starts a cooldown in BOTH clock domains at once (2026-08-30, per the user): `RBS_CDState` (this
+-- session's live display, keyed the same way, valued in GetTime() -- required by
+-- CooldownFrame_SetTimer's own radial-swipe math, and already correct across a plain /reload since
+-- GetTime() keeps counting through one) and `RaidBuffStatusConfig.CDSaved` (persisted to disk via
+-- this addon's own SavedVariables, valued in time() -- real wall-clock epoch seconds, the ONLY clock
+-- that still means anything after the game process itself restarts, since GetTime() resets to ~0 on
+-- every fresh client launch). Without the second one, closing and reopening the game would forget
+-- an in-progress cooldown entirely and show everyone as "ready" again, which is exactly the bug the
+-- user reported (their Druid's Innervate looked available after a crash/relog when it was actually
+-- still on cooldown). RBS_OnAddonLoaded converts CDSaved back into a fresh RBS_CDState entry for the
+-- new session on login/reload; RBS_UpdateCooldowns clears BOTH tables together once a cooldown
+-- actually expires.
+function RBS_SetCDReady(key, cooldownSeconds)
+	RBS_CDState[key] = GetTime() + cooldownSeconds
+	RaidBuffStatusConfig.CDSaved = RaidBuffStatusConfig.CDSaved or {}
+	RaidBuffStatusConfig.CDSaved[key] = time() + cooldownSeconds
+end
+
+-- Global, NOT local (2026-08-30): RBS_OnEvent, which calls this, is defined EARLIER in this file --
+-- per this project's own confirmed Lua-ordering gotcha (see CLAUDE.md), a `local function` declared
+-- further down resolves as a nil global at an earlier call site even though that call only actually
+-- runs later, at event time. Every other cross-section function in this file already sidesteps this
+-- the same way (RBS_OnEvent/RBS_OnLoad/RBS_OnUpdate/RBS_UpdateDashboard are all plain globals too).
+function RBS_OnCombatLogCooldowns()
+	if not arg10 then
+		return
+	end
+
+	-- Broadened (2026-08-30): originally this only printed when arg10 ALREADY matched one of our
+	-- guessed spellName strings -- useless for the actual question "is our guessed name wrong", which
+	-- is exactly what happened with Lightwell (zero debug output at all when cast, meaning either the
+	-- guessed name never matched anything, or this event never fires for it in the first place). Now
+	-- prints EVERY combat log event where the LOCAL PLAYER is the source, regardless of spell name, so
+	-- a real cast's actual arg2/arg10 layout can be read directly instead of guessed at.
+	if RBS_CDDebug and arg4 == UnitName("player") then
+		DEFAULT_CHAT_FRAME:AddMessage(
+			"|cFF00CCFFRaidBuffStatus CD debug:|r arg2=" .. tostring(arg2) .. " arg4=" .. tostring(arg4)
+				.. " arg9=" .. tostring(arg9) .. " arg10=" .. tostring(arg10)
+		)
+	end
+
+	if arg2 ~= "SPELL_CAST_SUCCESS" then
+		return
+	end
+
+	local track = RaidBuffStatusConfig.CDTrack or {}
+	for i = 1, table.getn(RBS_CD_LIST), 1 do
+		local def = RBS_CD_LIST[i]
+		if track[def.id] and arg10 == def.spellName then
+			if RBS_GroupMemberClass(arg4) == def.class then
+				RBS_SetCDReady(def.id .. "|" .. arg4, def.cooldown)
+			end
+			break
+		end
+	end
+end
+
+-- Hidden scanning tooltip, dedicated to CD-buff caster resolution (kept separate from
+-- RBS_SoulstoneTip above rather than sharing one -- cheap to duplicate, and keeps this section
+-- independent of the Soulstone one). Same "Cast by: <name>" line technique.
+local RBS_CDTip = nil
+local function RBS_CDTipCaster(unit, index)
+	if not RBS_CDTip then
+		RBS_CDTip = CreateFrame("GameTooltip", "RaidBuffStatusCDTip", nil, "GameTooltipTemplate")
+		RBS_CDTip:SetOwner(WorldFrame, "ANCHOR_NONE")
+	end
+	RBS_CDTip:ClearLines()
+	RBS_CDTip:SetUnitBuff(unit, index)
+	for i = 1, 8, 1 do
+		local line = getglobal("RaidBuffStatusCDTipTextLeft" .. i)
+		if not line then
+			break
+		end
+		local text = line:GetText()
+		if text and string.find(text, "Cast by: ", 1, true) then
+			return string.sub(text, string.len("Cast by: ") + 1)
+		end
+	end
+	return nil
+end
+
+-- [unit .. "|" .. abilityId] = true/false, this unit's last-seen state for that ability's buff.
+-- Global for the same cross-function-visibility reason as RBS_SoulstoneHadIt/RBS_BuffIcons above.
+RBS_CDBuffHadIt = {}
+
+-- Generalizes the Soulstone transition-detection technique (see that section's own comment) to any
+-- RBS_CD_LIST entry that has a `buffName`. Walks the raid/party roster once, and for each tracked
+-- ability with a buffName, reacts to that buff newly appearing on a unit by starting a cooldown for
+-- whoever cast it -- immediately for `selfOnly` entries (the buffed unit IS the caster), otherwise
+-- via the aura tooltip's "Cast by" line.
+function RBS_ScanCDBuffs()
+	local track = RaidBuffStatusConfig.CDTrack or {}
+
+	local function checkUnit(unit)
+		if not UnitExists(unit) then
+			return
+		end
+		local name = UnitName(unit) or unit
+
+		for i = 1, table.getn(RBS_CD_LIST), 1 do
+			local def = RBS_CD_LIST[i]
+			if def.buffName and track[def.id] then
+				local hasIt = false
+				local castByIndex = nil
+				local index = 1
+				while true do
+					local ok, aura = pcall(C_UnitAuras.GetAuraDataByIndex, unit, index, "HELPFUL")
+					if not ok or not aura then
+						break
+					end
+					if aura.name == def.buffName then
+						hasIt = true
+						castByIndex = index
+						break
+					end
+					index = index + 1
+				end
+
+				local stateKey = unit .. "|" .. def.id
+				if hasIt and RBS_CDBuffHadIt[stateKey] == false then
+					local caster = name
+					if not def.selfOnly then
+						local okCaster, tipCaster = pcall(RBS_CDTipCaster, unit, castByIndex)
+						if okCaster and tipCaster and tipCaster ~= "" then
+							caster = tipCaster
+						else
+							caster = nil
+						end
+					end
+					if caster then
+						RBS_SetCDReady(def.id .. "|" .. caster, def.cooldown)
+					end
+				end
+				RBS_CDBuffHadIt[stateKey] = hasIt
+			end
+		end
+	end
+
+	if GetNumRaidMembers() > 0 then
+		for i = 1, GetNumRaidMembers(), 1 do
+			checkUnit("raid" .. i)
+		end
+	else
+		checkUnit("player")
+		for i = 1, GetNumPartyMembers(), 1 do
+			checkUnit("party" .. i)
+		end
+	end
+end
+
+local function RBS_BuildOneCDRow(i)
+	-- Defensive fallback (2026-08-30): RBS_OnAddonLoaded is what actually fixes CDIconSize coming
+	-- back nil (see its own comment), but this `or 20` costs nothing and means a row can never fail
+	-- to build even if some future code path calls this before that handler has run.
+	local iconSize = RaidBuffStatusConfig.CDIconSize or 20
+	local row = CreateFrame("Frame", nil, RaidBuffStatusCDFrame)
+	-- Explicit width (2026-08-30): this was never set at all before, defaulting to 0 -- almost
+	-- certainly harmless on its own (children position from their own anchors regardless), but cheap
+	-- to fix while chasing the "literally nothing renders, even the fake /rbs cdtest entry" report.
+	row:SetWidth(200)
+	row:SetHeight(iconSize)
+
+	local icon = row:CreateTexture(nil, "ARTWORK")
+	icon:SetPoint("LEFT", row, "LEFT", 0, 0)
+	icon:SetWidth(iconSize)
+	icon:SetHeight(iconSize)
+	row.icon = icon
+
+	-- REMOVED (2026-08-30): the native radial swipe (CreateFrame("Model", ..., "CooldownFrameTemplate"),
+	-- mirroring Holyward's own Serenity_GetOrCreateCooldown). Pulled out entirely while chasing "the
+	-- whole row renders as literally nothing, not even a plain icon" -- this was the one genuinely
+	-- unverified, untested-in-THIS-addon piece (unlike the icon+text pattern below, which is the exact
+	-- same one already proven working in the main dashboard's own buff icons all session). Holyward's
+	-- own version also calls SetScale(size/36) on it, which this port never did -- a real, concrete
+	-- difference from the proven reference, and plausible enough as a cause (an unscaled swipe from a
+	-- template sized for a ~36px button could render oversized/misplaced) that it's not worth
+	-- debugging blind. Worth re-adding later as its own isolated step once the basic row is confirmed
+	-- visible, matching the scale fix this time.
+	row.cooldown = nil
+
+	-- Big yellow countdown right next to the icon -- the same RGB Holyward's own
+	-- SerenityGraphicalTimer.lua uses for its countdown label, matching the screenshot the user gave
+	-- (icon + native swipe + a bold yellow "0:13", no boxed panel around any of it).
+	local timerText = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+	timerText:SetPoint("LEFT", icon, "RIGHT", 4, 0)
+	timerText:SetJustifyH("Left")
+	timerText:SetTextColor(1, 0.82, 0)
+	row.timerText = timerText
+
+	-- Caster + ability name -- smaller and secondary, trailing after the countdown, since Holyward's
+	-- own single-target timer doesn't need this at all (it only ever tracks the local player's own
+	-- ability) but this addon tracks a whole raid, so SOME identifying text has to stay somewhere.
+	local text = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+	text:SetPoint("LEFT", timerText, "RIGHT", 6, 0)
+	text:SetJustifyH("Left")
+	row.text = text
+
+	row:Hide()
+	RBS_CDRows[i] = row
+end
+
+-- Deferred the same way RBS_BuildHeader is (see RBS_OnLoad/RBS_NeedsHeaderBuild above): building
+-- this row pool synchronously during OnLoad would hit the identical table-write-doesn't-persist bug
+-- confirmed there. Built on the CD frame's own first OnUpdate tick instead.
+local function RBS_BuildCDRows()
+	for i = 1, RBS_CD_MAX_ROWS, 1 do
+		local ok, err = pcall(RBS_BuildOneCDRow, i)
+		if not ok then
+			DEFAULT_CHAT_FRAME:AddMessage(
+				"|cFF00CCFFRaidBuffStatus:|r |cFFFF0000error building CD row " .. i .. ":|r " .. tostring(err)
+			)
+		end
+	end
+end
+
+-- Called from the options window's "Icon size" slider for the Cooldowns tab. Existing pooled rows
+-- were already sized at build time, so those need an explicit resize here.
+function RBS_ApplyCDIconSize(newSize)
+	RaidBuffStatusConfig.CDIconSize = newSize
+	for i = 1, RBS_CD_MAX_ROWS, 1 do
+		local row = RBS_CDRows[i]
+		if row then
+			row:SetHeight(newSize)
+			row.icon:SetWidth(newSize)
+			row.icon:SetHeight(newSize)
+		end
+	end
+end
+
+-- Rebuilds the visible row list from RBS_CDState every tick: assigns one pooled row per still-active
+-- (ability, caster) cooldown, hides the rest, and prunes expired entries out of RBS_CDState as it
+-- goes (safe to clear the CURRENT key of a table mid-`pairs()` traversal per the Lua manual -- only
+-- adding a NEW key during traversal is undefined). Row order isn't stable between ticks (`pairs()`
+-- order isn't guaranteed) -- a cosmetic reshuffle while several cooldowns are active, not a
+-- correctness bug; not worth a sort for a first version of this feature.
+local function RBS_UpdateCooldowns()
+	if not RaidBuffStatusConfig.CDEnabled then
+		-- The CONTAINER is never hidden (see RBS_CreateCDFrame's comment) -- only the rows, so any
+		-- leftover ones from before CDEnabled got turned off don't stay stuck on screen.
+		for i = 1, RBS_CD_MAX_ROWS, 1 do
+			if RBS_CDRows[i] then
+				RBS_CDRows[i]:Hide()
+			end
+		end
+		return
+	end
+
+	if RBS_CDNeedsBuild then
+		RBS_CDNeedsBuild = false
+		RBS_BuildCDRows()
+	end
+
+	-- Defensive fallbacks (2026-08-30, see RBS_OnAddonLoaded's comment for the actual root-cause
+	-- fix) -- computed once per tick instead of trusting every raw RaidBuffStatusConfig field read
+	-- below to already be non-nil.
+	local iconSize = RaidBuffStatusConfig.CDIconSize or 20
+	local track = RaidBuffStatusConfig.CDTrack or {}
+
+	local now = GetTime()
+	local activeRows = 0
+
+	for key, readyAt in pairs(RBS_CDState) do
+		local remaining = readyAt - now
+		if remaining <= 0 then
+			RBS_CDState[key] = nil
+			if RaidBuffStatusConfig.CDSaved then
+				RaidBuffStatusConfig.CDSaved[key] = nil
+			end
+		else
+			local sep = string.find(key, "|", 1, true)
+			local id = string.sub(key, 1, sep - 1)
+			local caster = string.sub(key, sep + 1)
+			if track[id] then
+				local def = nil
+				for i = 1, table.getn(RBS_CD_LIST), 1 do
+					if RBS_CD_LIST[i].id == id then
+						def = RBS_CD_LIST[i]
+						break
+					end
+				end
+				if def and activeRows < RBS_CD_MAX_ROWS then
+					activeRows = activeRows + 1
+					local row = RBS_CDRows[activeRows]
+					if row then
+						row.icon:SetTexture(def.icon)
+						if row.cooldown and CooldownFrame_SetTimer then
+							-- start = the moment the cast actually happened (readyAt minus the full
+							-- cooldown length), duration = the full cooldown -- same math Holyward's
+							-- own SerenityGraphicalTimer.lua uses (there stored as TimeMax-Time).
+							pcall(CooldownFrame_SetTimer, row.cooldown, readyAt - def.cooldown, def.cooldown, 1)
+						end
+						if RaidBuffStatusConfig.CDShowLabels then
+							row.text:SetText(caster .. " -- " .. def.label)
+						else
+							row.text:SetText(caster)
+						end
+						local mins = math.floor(remaining / 60)
+						local secs = math.floor(math.mod(remaining, 60))
+						row.timerText:SetText(string.format("%d:%02d", mins, secs))
+						row:ClearAllPoints()
+						row:SetPoint(
+							"TOPLEFT", RaidBuffStatusCDFrame, "TOPLEFT", 0,
+							-RBS_CD_TITLE_H - (activeRows - 1) * (iconSize + RBS_CD_ROW_GAP)
+						)
+						row:Show()
+					end
+				end
+			end
+		end
+	end
+
+	for i = activeRows + 1, RBS_CD_MAX_ROWS, 1 do
+		if RBS_CDRows[i] then
+			RBS_CDRows[i]:Hide()
+		end
+	end
+
+	-- No empty-state text anymore (2026-08-30) -- matching the borderless Holyward look, the frame
+	-- should show literally nothing when there's nothing on cooldown, not a placeholder message.
+	-- The container itself is never hidden/shown here at all (see RBS_CreateCDFrame) -- an "empty"
+	-- state is just zero visible rows, since the container draws nothing of its own.
+	RaidBuffStatusCDFrame:SetHeight(RBS_CD_TITLE_H + math.max(activeRows, 1) * (iconSize + RBS_CD_ROW_GAP) + 4)
+end
+
+-- Built entirely in Lua (no XML) -- same self-contained WHITE8X8 flat-dark-panel trick documented in
+-- this project's CLAUDE.md, already used elsewhere in this file. Movable but not resizable for this
+-- first version (unlike the main window's hand-tuned manual-resize grip) -- row count/height already
+-- auto-fits the content, and the main window's resize code took many iterations to get right; a
+-- second, different (vertical-list, not wrapping-grid) layout mode isn't worth that same risk yet.
+-- Position isn't saved across /reload for the same reason -- an accepted v1 limitation, not an
+-- oversight.
+-- Borderless, no title, no backdrop (2026-08-30, per the user's own Holyward screenshot) -- Holyward's
+-- own cooldown display (serenity-twow\SerenityGraphicalTimer.lua) is just a bare icon with the native
+-- radial swipe and a yellow countdown number floating directly over the game world, NOT a dark boxed
+-- panel with a title bar -- the WHITE8X8 flat-dark-panel look used for the main RaidBuffStatus window
+-- and the resize grip elsewhere in this file doesn't apply here, that's a different UI element with
+-- different intent. EnableMouse(true) + a real width/height still gives this an invisible, draggable
+-- click-region even with nothing drawn for it -- no backdrop is needed for dragging to work.
+local RBS_CDFrameLastCheck = 0
+local RBS_CD_TICK_INTERVAL = 1
+
+-- Drives Cooldowns entirely on its own -- see RBS_CreateCDFrame's comment below for why this can no
+-- longer ride the main dashboard's OnUpdate. Global (not local) purely for consistency with every
+-- other SetScript handler in this file; nothing outside RBS_CreateCDFrame calls it directly.
+function RBS_CDFrameOnUpdate()
+	local curTime = GetTime()
+	if (curTime - RBS_CDFrameLastCheck) < RBS_CD_TICK_INTERVAL then
+		return
+	end
+	RBS_CDFrameLastCheck = curTime
+	RBS_ScanCDBuffs()
+	RBS_UpdateCooldowns()
+end
+
+-- CONFIRMED root cause (2026-08-30) of "cdtest still shows nothing": this frame's ticking used to be
+-- piggybacked on the MAIN RaidBuffStatusFrame's OnUpdate script -- but OnUpdate does NOT fire at all
+-- while its owning frame is hidden, on this or any WoW client. Whenever the main dashboard window
+-- was disabled/hidden, Cooldowns (and Death Warnings, and Soulstone tracking, which ride the same
+-- OnUpdate) silently stopped running entirely, no matter what RBS_CDState held -- injecting a fake
+-- entry via /rbs cdtest couldn't help either, since the code that would ever call :Show() on this
+-- frame simply never ran. Fixed by giving this frame its OWN OnUpdate (RBS_CDFrameOnUpdate, defined
+-- below) and NEVER hiding the frame itself -- CDEnabled / "nothing active" is expressed by hiding
+-- the individual ROWS only, specifically so this frame's own OnUpdate keeps ticking forever and can
+-- notice CDEnabled being turned back on later, rather than getting stuck hidden with no way to wake
+-- itself back up.
+local function RBS_CreateCDFrame()
+	local f = CreateFrame("Frame", "RaidBuffStatusCDFrame", UIParent)
+	f:SetWidth(160)
+	f:SetHeight(24)
+	f:SetPoint("CENTER", UIParent, "CENTER", 0, 80)
+	f:SetFrameStrata("MEDIUM")
+	f:EnableMouse(true)
+	f:SetMovable(true)
+	f:RegisterForDrag("LeftButton")
+	f:SetScript("OnDragStart", function()
+		this:StartMoving()
+	end)
+	f:SetScript("OnDragStop", function()
+		this:StopMovingOrSizing()
+	end)
+	f:SetScript("OnUpdate", RBS_CDFrameOnUpdate)
+
+	RBS_CDNeedsBuild = true
+end
+
+-- Re-applies every RaidBuffStatusConfig default AND refreshes the RBS_ICON_SIZE global mirror
+-- derived from it -- called from the ADDON_LOADED branch of RBS_OnEvent (registered in RBS_OnLoad),
+-- gated on arg1 == "RaidBuffStatus" so it only reacts to THIS addon finishing its own load, not any
+-- other addon's.
+--
+-- CONFIRMED root cause (2026-08-30) of "attempt to index field `CDTrack' (a nil value)" / "attempt
+-- to perform arithmetic on field `CDIconSize' (a nil value)" on an existing character: a real,
+-- well-documented WoW SavedVariables gotcha, not specific to this client. The engine restores an
+-- addon's `## SavedVariablesPerCharacter` global from disk (a full table REASSIGNMENT, not a merge)
+-- only AFTER that addon's own TOC-listed files finish executing -- right when it fires ADDON_LOADED
+-- for that addon. On an existing character whose saved file predates a field added THIS session
+-- (CDEnabled/CDIconSize/CDShowLabels/CDTrack all didn't exist in any save made before today), that
+-- restore overwrites RaidBuffStatusConfig with the OLD saved table, which simply doesn't have the
+-- new fields -- wiping out the fresh defaults this file's own top-level code had just set moments
+-- earlier. Every OLDER field (Enabled/IconSize/AutoInvite/DeathWarnings/TauntWarnings) was invisible
+-- to this exact bug purely by luck: Enabled/IconSize were already present in every prior save
+-- (nothing new to wipe), and the three booleans are only ever read via `if RaidBuffStatusConfig.X
+-- then` checks, where a nil silently reads as false instead of crashing -- CDIconSize/CDTrack are
+-- used in arithmetic/table-indexing instead, where nil actually throws.
+function RBS_OnAddonLoaded()
+	RaidBuffStatusConfig.IconSize = RaidBuffStatusConfig.IconSize or 28
+	RaidBuffStatusConfig.AutoInvite = RaidBuffStatusConfig.AutoInvite or false
+	RaidBuffStatusConfig.DeathWarnings = RaidBuffStatusConfig.DeathWarnings or false
+	RaidBuffStatusConfig.TauntWarnings = RaidBuffStatusConfig.TauntWarnings or false
+	RaidBuffStatusConfig.CDEnabled = RaidBuffStatusConfig.CDEnabled or false
+	RaidBuffStatusConfig.CDIconSize = RaidBuffStatusConfig.CDIconSize or 20
+	if RaidBuffStatusConfig.CDShowLabels == nil then
+		RaidBuffStatusConfig.CDShowLabels = true
+	end
+	RaidBuffStatusConfig.CDTrack = RaidBuffStatusConfig.CDTrack or {}
+	for i = 1, table.getn(RBS_CD_LIST), 1 do
+		local id = RBS_CD_LIST[i].id
+		if RaidBuffStatusConfig.CDTrack[id] == nil then
+			RaidBuffStatusConfig.CDTrack[id] = true
+		end
+	end
+	RBS_ICON_SIZE = RaidBuffStatusConfig.IconSize
+
+	-- Restores any cooldown still in progress from BEFORE this login (per the user, 2026-08-30):
+	-- converts each saved time() epoch value back into a fresh GetTime()-based RBS_CDState entry for
+	-- THIS session, using the real wall-clock gap between when it was saved and right now -- correct
+	-- whether that gap was a two-second /reload or the game having been fully closed and reopened.
+	-- See RBS_SetCDReady's own comment for why two separate clocks are needed at all.
+	RaidBuffStatusConfig.CDSaved = RaidBuffStatusConfig.CDSaved or {}
+	local nowEpoch = time()
+	for key, readyAtEpoch in pairs(RaidBuffStatusConfig.CDSaved) do
+		local remaining = readyAtEpoch - nowEpoch
+		if remaining > 0 then
+			RBS_CDState[key] = GetTime() + remaining
+		else
+			RaidBuffStatusConfig.CDSaved[key] = nil
+		end
+	end
+end
+
+------------------------------------------------------------------------------------------------------
 -- LOAD / UPDATE / SLASH COMMAND
 ------------------------------------------------------------------------------------------------------
 
@@ -758,6 +1451,7 @@ function RBS_OnLoad()
 	this:RegisterForDrag("LeftButton")
 	this:RegisterEvent("CHAT_MSG_WHISPER")
 	this:RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED")
+	this:RegisterEvent("ADDON_LOADED")
 	-- CONFIRMED via Holyward's own tracker-resize grip (Holyward.lua, proven working on this exact
 	-- client): the XML `resizable="true"` attribute alone was NOT enough there either -- an explicit
 	-- SetResizable(true) call is what actually flags the frame resizable on this client.
@@ -772,6 +1466,8 @@ function RBS_OnLoad()
 	-- worked immediately. Deferring the real build to the first RBS_OnUpdate tick sidesteps
 	-- whatever is different about writing to this table during the OnLoad/ADDON_LOADED phase itself.
 	RBS_NeedsHeaderBuild = true
+
+	RBS_CreateCDFrame()
 
 	-- Resize grip -- manual cursor-tracking resize (2026-08-27), NOT native StartSizing/
 	-- StopMovingOrSizing. Confirmed broken on this client: with StartSizing("BOTTOMRIGHT") only
@@ -823,6 +1519,54 @@ function RBS_OnLoad()
 			RBS_TauntDebug = not RBS_TauntDebug
 			DEFAULT_CHAT_FRAME:AddMessage(
 				"|cFF00CCFFRaidBuffStatus:|r Taunt debug " .. (RBS_TauntDebug and "ON -- taunt something and watch chat." or "off.")
+			)
+			return
+		end
+		if msg == "ssdebug" then
+			RBS_SSDebug = not RBS_SSDebug
+			DEFAULT_CHAT_FRAME:AddMessage(
+				"|cFF00CCFFRaidBuffStatus:|r Soulstone debug " .. (RBS_SSDebug and "ON -- have a warlock soulstone someone and watch chat." or "off.")
+			)
+			return
+		end
+		if msg == "cddebug" then
+			RBS_CDDebug = not RBS_CDDebug
+			DEFAULT_CHAT_FRAME:AddMessage(
+				"|cFF00CCFFRaidBuffStatus:|r Cooldown debug " .. (RBS_CDDebug and "ON -- have a tracked ability cast near you and watch chat." or "off.")
+			)
+			return
+		end
+		-- "/rbs cdstate" -- separates "the Cooldowns window/feature isn't on" from "it's on but this
+		-- specific ability isn't being detected", by dumping the exact state RBS_UpdateCooldowns
+		-- itself reads from, instead of only ever being able to look at the visual result.
+		if msg == "cdstate" then
+			DEFAULT_CHAT_FRAME:AddMessage(
+				"|cFF00CCFFRaidBuffStatus:|r CDEnabled=" .. tostring(RaidBuffStatusConfig.CDEnabled)
+					.. " CDFrame shown=" .. tostring(RaidBuffStatusCDFrame and RaidBuffStatusCDFrame:IsShown())
+			)
+			local count = 0
+			for key, readyAt in pairs(RBS_CDState) do
+				count = count + 1
+				local remaining = readyAt - GetTime()
+				DEFAULT_CHAT_FRAME:AddMessage("  " .. key .. " -- " .. math.floor(remaining) .. "s left")
+			end
+			if count == 0 then
+				DEFAULT_CHAT_FRAME:AddMessage("  RBS_CDState is empty -- nothing has been detected as cast yet.")
+			end
+			return
+		end
+		-- "/rbs cdtest" -- the Cooldowns frame has no visible backdrop/title at all anymore (matching
+		-- Holyward's own borderless look), so when it's empty there's genuinely NOTHING to see, which
+		-- makes it impossible to tell "detection isn't working" apart from "I don't even know where
+		-- this window is on my screen". This forces one fake 30-second entry so the window is
+		-- guaranteed to render, independent of whether real detection works at all -- it defaults to
+		-- the middle of the screen, slightly above center (RBS_CreateCDFrame's own default position).
+		if msg == "cdtest" then
+			RaidBuffStatusConfig.CDEnabled = true
+			RBS_CDState["INNERVATE|TestDruid"] = GetTime() + 30
+			DEFAULT_CHAT_FRAME:AddMessage(
+				"|cFF00CCFFRaidBuffStatus:|r Injected a fake 30s Innervate cooldown -- look near the "
+					.. "middle of your screen, slightly above center. Drag it to reposition."
 			)
 			return
 		end
@@ -931,6 +1675,10 @@ function RBS_OnUpdate()
 		RBS_LastDeathCheck = curTime
 		RBS_CheckDeaths()
 	end
+
+	-- Cooldowns no longer ticks from here (2026-08-30) -- it has its own OnUpdate on
+	-- RaidBuffStatusCDFrame now (RBS_CDFrameOnUpdate), specifically so it keeps working even while
+	-- THIS frame (the main dashboard) is hidden/disabled -- see that function's own comment.
 
 	if not RaidBuffStatusConfig.Enabled then
 		return

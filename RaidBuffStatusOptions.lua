@@ -330,6 +330,77 @@ local function CreateTanksTab()
 	}
 end
 
+-- Raid ability cooldown tracker (2026-08-30) -- generated from RBS_CD_LIST (a global defined in
+-- RaidBuffStatus.lua) so adding/removing a tracked ability there doesn't need a matching hand-edit
+-- here.
+local function CreateCooldownsTab()
+	local args = {
+		enabled = {
+			type = "toggle", order = 1, width = "full",
+			name = "Enabled",
+			desc = "Shows the Cooldowns window and tracks the abilities below. Does NOT require anyone else to run this addon -- but it only knows about a cast this client actually witnessed while running, not one that happened before you logged in or joined the group.",
+			get = function()
+				return RaidBuffStatusConfig.CDEnabled
+			end,
+			set = function(info, value)
+				RaidBuffStatusConfig.CDEnabled = value
+			end,
+		},
+		iconSize = {
+			type = "range", order = 2, width = "full",
+			name = "Icon size",
+			desc = "Size, in pixels, of each row's icon in the Cooldowns window.",
+			min = 14, max = 32, step = 1,
+			get = function()
+				return RaidBuffStatusConfig.CDIconSize or 20
+			end,
+			set = function(info, value)
+				RBS_ApplyCDIconSize(value)
+			end,
+		},
+		showLabels = {
+			type = "toggle", order = 3, width = "full",
+			name = "Show ability name",
+			desc = "Shows the ability name next to the caster's name in each row. Turn off to show just the caster's name (more compact).",
+			get = function()
+				return RaidBuffStatusConfig.CDShowLabels
+			end,
+			set = function(info, value)
+				RaidBuffStatusConfig.CDShowLabels = value
+			end,
+		},
+		trackHeader = {
+			type = "header", order = 4,
+			name = "Track which abilities",
+		},
+	}
+
+	for i = 1, table.getn(RBS_CD_LIST), 1 do
+		local def = RBS_CD_LIST[i]
+		args["track_" .. def.id] = {
+			type = "toggle", order = 4 + i, width = "full",
+			name = def.label .. " (" .. def.class .. ")",
+			desc = "Track " .. def.label .. ".",
+			-- Defensive nil-table guards (2026-08-30): the real fix for CDTrack coming back nil is
+			-- RBS_OnAddonLoaded (RaidBuffStatus.lua) reacting to ADDON_LOADED, but these cost nothing
+			-- and mean the options panel itself can never crash on this either.
+			get = function()
+				return RaidBuffStatusConfig.CDTrack and RaidBuffStatusConfig.CDTrack[def.id]
+			end,
+			set = function(info, value)
+				RaidBuffStatusConfig.CDTrack = RaidBuffStatusConfig.CDTrack or {}
+				RaidBuffStatusConfig.CDTrack[def.id] = value
+			end,
+		}
+	end
+
+	return {
+		name = "Cooldowns",
+		type = "group",
+		args = args,
+	}
+end
+
 local function CreateOptionsTable()
 	return {
 		name = "RaidBuffStatus Options",
@@ -340,6 +411,7 @@ local function CreateOptionsTable()
 			raidassist_tab = CreateRaidAssistTab(),
 			healers_tab = CreateHealersTab(),
 			tanks_tab = CreateTanksTab(),
+			cooldowns_tab = CreateCooldownsTab(),
 		},
 	}
 end
@@ -379,8 +451,8 @@ local function RaidBuffStatusOptions_Initialize()
 	configFrame:Hide()
 
 	-- Smaller than Holyward's own 625x700, but wide enough for the tab row across the top (General/
-	-- RaidAssist/Healers/Tanks).
-	Dialog:SetDefaultSize(APP_NAME, 420, 260)
+	-- RaidAssist/Healers/Tanks/Cooldowns) and tall enough for the Cooldowns tab's per-ability list.
+	Dialog:SetDefaultSize(APP_NAME, 420, 320)
 	Dialog:Open(APP_NAME, configFrame)
 	configFrame:SetLayout("Fill")
 

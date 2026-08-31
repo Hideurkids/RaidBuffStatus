@@ -21,7 +21,7 @@ One icon per tracked buff, each showing a live count of how many people are miss
 when everyone has it, red otherwise):
 
 - Arcane Intellect, Mark of the Wild / Gift of the Wild, Power Word: Fortitude, Divine Spirit,
-  Shadow Protection, Thorns
+  Shadow Protection
 - All six long-duration Paladin Blessings individually (Might, Kings, Wisdom, Salvation,
   Sanctuary, Light) — Freedom and Protection are deliberately excluded, since those are
   situational defensive cooldowns, not something a raid maintains on everyone
@@ -71,9 +71,33 @@ Optional (Options → RaidAssist): automatically invites anyone who whispers you
 <!-- Screenshot: RaidAssist tab, Auto-invite option -->
 ![Auto-invite option](./screenshots/autoinvite.png)
 
+### Raid cooldown tracker *(BETA — actively being tested, off by default)*
+A separate floating window (icon + native cooldown swipe + countdown, no boxed panel) that watches
+for a handful of class raid cooldowns and shows who's on cooldown for what — **without** requiring
+anyone else in your raid to run this addon. Currently tracks: Innervate, Battle Rez, Bloodlust,
+Heroism, Spirit Link Totem, Ascendance, Lightwell, Shield Wall, Challenging Shout, Berserker Rage,
+Pummel, Disarm, Lay on Hands, Blessing of Protection, Divine Shield, Divine Intervention,
+Challenging Roar, Mana Tide Totem, Reincarnation, Tranquilizing Shot, Kick, Vanish, and Evasion —
+each individually toggleable in Options → Cooldowns.
+
+This is new and still being verified in-game, so a few things are expected to be rough around the
+edges for now:
+- Only casts this client actually witnesses *while running* are tracked — a cooldown already in
+  progress before you logged in reads as "ready" until the next real cast. (An in-progress
+  cooldown DOES survive closing and reopening the game entirely, once it's been witnessed once.)
+- Detection uses two different techniques depending on the ability: most are caught by watching
+  for the resulting buff to appear (Innervate, Bloodlust, Heroism, Shield Wall, Berserker Rage,
+  Divine Shield, Blessing of Protection, Mana Tide Totem, Evasion, Spirit Link Totem); a few rely
+  on the combat log instead, which has been confirmed unreliable for plain self-buffs on this
+  client — so Lightwell, Battle Rez, Vanish, and the various interrupts/taunts currently don't get
+  detected at all.
+- Several exact spell names and cooldown durations (Ascendance, Lightwell, Spirit Link Totem,
+  Heroism, Battle Rez) are best-guess placeholders, since these aren't vanilla-original abilities
+  and this server has its own class changes — expect corrections as this gets tested further.
+
 ### Settings window
 A full AceConfig-based options dialog with the same dark theme used across this client's
-addons, split into General, RaidAssist, Healers, and Tanks tabs (Healers is currently a
+addons, split into General, RaidAssist, Healers, Tanks, and Cooldowns tabs (Healers is currently a
 placeholder for future options).
 
 <!-- Screenshot: settings window -->
@@ -93,6 +117,14 @@ placeholder for future options).
 - **`/rbs debug`** — dumps a fresh scan of every tracked buff straight to chat, for
   troubleshooting.
 - **`/rbs tauntdebug`** — toggles verbose combat-log output for the taunt-warning feature, for
+  troubleshooting.
+- **`/rbs cddebug`** — toggles verbose combat-log output for the cooldown tracker (beta), for
+  troubleshooting.
+- **`/rbs cdstate`** — dumps the cooldown tracker's current internal state (enabled? window shown?
+  what's actively tracked right now) straight to chat.
+- **`/rbs cdtest`** — injects a fake 30-second cooldown so the cooldown window's position/rendering
+  can be checked without waiting for a real cast.
+- **`/rbs ssdebug`** — toggles verbose tooltip output for Soulstone caster detection, for
   troubleshooting.
 - Drag the title bar to move the window; drag the bottom-left grip to resize it.
 
