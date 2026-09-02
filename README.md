@@ -80,13 +80,15 @@ Optional (Options → RaidAssist): automatically invites anyone who whispers you
 ![Auto-invite option](./screenshots/autoinvite.png)
 
 ### Raid cooldown tracker *(BETA — actively being tested, off by default)*
-A separate floating window (icon + native cooldown swipe + countdown, no boxed panel) that watches
-for a handful of class raid cooldowns and shows who's on cooldown for what — **without** requiring
-anyone else in your raid to run this addon. Currently tracks: Innervate, Battle Rez, Bloodlust,
-Heroism, Spirit Link Totem, Ascendance, Lightwell, Shield Wall, Challenging Shout, Berserker Rage,
-Pummel, Disarm, Lay on Hands, Blessing of Protection, Divine Shield, Divine Intervention,
-Challenging Roar, Mana Tide Totem, Reincarnation, Tranquilizing Shot, Kick, Vanish, and Evasion —
-each individually toggleable in Options → Cooldowns.
+A separate floating window (icon + countdown, no boxed panel) listing, for every tracked ability,
+every raid/party member of the matching class — **without** requiring anyone else in your raid to
+run this addon. Each row is a permanent "who has this" entry showing either "Ready" (green) or a
+red countdown, so the list stays static instead of icons popping in and out as cooldowns start and
+end. Currently tracks: Innervate, Battle Rez, Bloodlust, Heroism, Spirit Link Totem, Ascendance,
+Lightwell, Shield Wall, Challenging Shout, Berserker Rage, Pummel, Disarm, Lay on Hands, Blessing
+of Protection, Divine Shield, Divine Intervention, Challenging Roar, Mana Tide Totem,
+Reincarnation, Tranquilizing Shot, Kick, Vanish, and Evasion — each individually toggleable in
+Options → Cooldowns (turning off abilities you don't care about keeps the list shorter).
 
 This is new and still being verified in-game, so a few things are expected to be rough around the
 edges for now:
@@ -95,13 +97,13 @@ edges for now:
   cooldown DOES survive closing and reopening the game entirely, once it's been witnessed once.)
 - Detection uses two different techniques depending on the ability: most are caught by watching
   for the resulting buff to appear (Innervate, Bloodlust, Heroism, Shield Wall, Berserker Rage,
-  Divine Shield, Blessing of Protection, Mana Tide Totem, Evasion, Spirit Link Totem); a few rely
-  on the combat log instead, which has been confirmed unreliable for plain self-buffs on this
-  client — so Lightwell, Battle Rez, Vanish, and the various interrupts/taunts currently don't get
+  Divine Shield, Blessing of Protection, Mana Tide Totem, Evasion, Spirit Link Totem, Lightwell);
+  a few rely on the combat log instead, which has been confirmed unreliable for plain self-buffs on
+  this client — so Battle Rez, Vanish, and the various interrupts/taunts currently don't get
   detected at all.
-- Several exact spell names and cooldown durations (Ascendance, Lightwell, Spirit Link Totem,
-  Heroism, Battle Rez) are best-guess placeholders, since these aren't vanilla-original abilities
-  and this server has its own class changes — expect corrections as this gets tested further.
+- Several exact spell names and cooldown durations (Ascendance, Spirit Link Totem, Heroism, Battle
+  Rez) are best-guess placeholders, since these aren't vanilla-original abilities and this server
+  has its own class changes — expect corrections as this gets tested further.
 
 ### Settings window
 A full AceConfig-based options dialog with the same dark theme used across this client's

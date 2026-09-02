@@ -39,11 +39,29 @@ RaidBuffStatusConfig.AutoRemoveSalvation = RaidBuffStatusConfig.AutoRemoveSalvat
 RaidBuffStatusConfig.FightStartMisses = RaidBuffStatusConfig.FightStartMisses or false
 RaidBuffStatusConfig.FightStartMissesDuration = RaidBuffStatusConfig.FightStartMissesDuration or 8
 
+-- Persisted debug trace (2026-08-31): every RBS_XXXDebug print (CD debug, Soulstone debug, taunt
+-- debug, /rbs auradump) ALSO goes here, not just to chat -- this table lives inside
+-- RaidBuffStatusConfig, so it gets written to disk (SavedVariables) at the next logout/reload, at
+-- which point it can be read directly from the .lua file on disk without needing the user to
+-- screenshot or paste live chat output. Capped (RBS_LogDebug below) so it can't grow forever.
+RaidBuffStatusConfig.DebugLog = RaidBuffStatusConfig.DebugLog or {}
+local RBS_DEBUG_LOG_MAX = 150
+
+-- Global (not local) so every debug call site across this file can reach it regardless of
+-- definition order, same reasoning as every other cross-section function here.
+function RBS_LogDebug(msg)
+	RaidBuffStatusConfig.DebugLog = RaidBuffStatusConfig.DebugLog or {}
+	table.insert(RaidBuffStatusConfig.DebugLog, date("%H:%M:%S") .. " " .. tostring(msg))
+	while table.getn(RaidBuffStatusConfig.DebugLog) > RBS_DEBUG_LOG_MAX do
+		table.remove(RaidBuffStatusConfig.DebugLog, 1)
+	end
+end
+
 -- Bumped on every meaningful rewrite so a load-message screenshot can confirm which build is
 -- actually running, without having to ask the user to check -- also flags whether a stale/second
 -- copy of this addon (e.g. a leftover install of the old reference folder reusing the same global
 -- names) might be clobbering these functions after this file loads.
-RBS_BUILD = "v48-tank-utilities-mocking-salvation-fightstart"
+RBS_BUILD = "v53-persistent-debug-log"
 
 -- CONFIRMED via real raid testing (2026-08-31): right after a disconnect/reconnect (server kick,
 -- zone in, etc.), C_UnitAuras.GetAuraDataByIndex can return NOTHING for a window of several
@@ -239,7 +257,9 @@ local function RBS_SoulstoneTipCaster(unit, index)
 		end
 		local text = line:GetText()
 		if RBS_SSDebug and text then
-			DEFAULT_CHAT_FRAME:AddMessage("|cFF00CCFFRaidBuffStatus SS debug:|r line " .. i .. " = \"" .. text .. "\"")
+			local dbgMsg = "SS debug: line " .. i .. " = \"" .. text .. "\""
+			DEFAULT_CHAT_FRAME:AddMessage("|cFF00CCFFRaidBuffStatus:|r " .. dbgMsg)
+			RBS_LogDebug(dbgMsg)
 		end
 		if not found and text and string.find(text, "Cast by: ", 1, true) then
 			found = string.sub(text, string.len("Cast by: ") + 1)
@@ -768,11 +788,11 @@ local function RBS_OnCombatLog()
 	end
 
 	if RBS_TauntDebug then
-		DEFAULT_CHAT_FRAME:AddMessage(
-			"|cFF00CCFFRaidBuffStatus taunt debug:|r arg2=" .. tostring(arg2) .. " arg4=" .. tostring(arg4)
-				.. " arg7=" .. tostring(arg7) .. " arg9=" .. tostring(arg9) .. " arg10=" .. tostring(arg10)
-				.. " arg11=" .. tostring(arg11) .. " arg12=" .. tostring(arg12) .. " arg13=" .. tostring(arg13)
-		)
+		local dbgMsg = "taunt debug: arg2=" .. tostring(arg2) .. " arg4=" .. tostring(arg4)
+			.. " arg7=" .. tostring(arg7) .. " arg9=" .. tostring(arg9) .. " arg10=" .. tostring(arg10)
+			.. " arg11=" .. tostring(arg11) .. " arg12=" .. tostring(arg12) .. " arg13=" .. tostring(arg13)
+		DEFAULT_CHAT_FRAME:AddMessage("|cFF00CCFFRaidBuffStatus:|r " .. dbgMsg)
+		RBS_LogDebug(dbgMsg)
 	end
 
 	if arg2 == "SPELL_MISSED" and RaidBuffStatusConfig.TauntWarnings then
@@ -857,9 +877,9 @@ local function RBS_OnTauntChatMsg()
 				target = string.sub(target, 1, string.len(target) - 1)
 			end
 			if RBS_TauntDebug then
-				DEFAULT_CHAT_FRAME:AddMessage(
-					"|cFF00CCFFRaidBuffStatus taunt debug (chat):|r matched pattern " .. i .. ", target=" .. target
-				)
+				local dbgMsg = "taunt debug (chat): matched pattern " .. i .. ", target=" .. target
+				DEFAULT_CHAT_FRAME:AddMessage("|cFF00CCFFRaidBuffStatus:|r " .. dbgMsg)
+				RBS_LogDebug(dbgMsg)
 			end
 			if RaidBuffStatusConfig.TauntWarnings then
 				RBS_AnnounceTauntFail(target)
@@ -869,7 +889,9 @@ local function RBS_OnTauntChatMsg()
 	end
 
 	if RBS_TauntDebug and string.find(arg1, "Taunt", 1, true) then
-		DEFAULT_CHAT_FRAME:AddMessage("|cFF00CCFFRaidBuffStatus taunt debug (chat):|r unmatched: \"" .. arg1 .. "\"")
+		local dbgMsg = "taunt debug (chat): unmatched: \"" .. arg1 .. "\""
+		DEFAULT_CHAT_FRAME:AddMessage("|cFF00CCFFRaidBuffStatus:|r " .. dbgMsg)
+		RBS_LogDebug(dbgMsg)
 	end
 end
 
@@ -1021,7 +1043,11 @@ local function RBS_CheckDeaths()
 		if UnitExists(unit) then
 			local name = UnitName(unit)
 			if name then
-				local isDead = UnitIsDeadOrGhost(unit) and true or false
+				-- CONFIRMED (2026-08-31, per the user): a Hunter using Feign Death got announced as
+				-- dead. UnitIsDeadOrGhost() is fooled by Feign Death on this client (a known vanilla
+				-- API quirk, not specific to this addon) -- UnitIsFeignDeath(unit) is the real vanilla
+				-- API that exists specifically to tell the two apart, so it's excluded here.
+				local isDead = (UnitIsDeadOrGhost(unit) and not UnitIsFeignDeath(unit)) and true or false
 				-- State is recorded BEFORE attempting the announcement, and the announcement itself
 				-- is pcall-wrapped -- confirmed live (2026-08-29): RaidNotice_AddMessage doesn't
 				-- exist on this client, and because that error unwound the whole function before
@@ -1124,11 +1150,18 @@ RBS_CD_LIST = {
 	-- UNCONFIRMED: "Ascendance" isn't a vanilla Priest ability -- almost certainly a TWoW/OctoWoW
 	-- class-change talent. spellName/cooldown/icon are all placeholders.
 	{ id = "ASCENDANCE", label = "Ascendance",        icon = "Interface\\Icons\\Spell_Shadow_Shadowform",    class = "Priest", spellName = "Ascendance",        cooldown = 3 * 60 },
-	-- UNCONFIRMED: Lightwell is a TBC-era Holy Priest talent, not vanilla -- likely present here via
-	-- the same kind of TWoW/OctoWoW class change as Ascendance above. spellName/cooldown/icon are
-	-- all placeholders (real retail cooldown is 3 min base, reduced by the Tranquil Spirit talent --
+	-- Lightwell isn't a vanilla-era ability (added in TBC) -- likely present here via a TWoW/OctoWoW
+	-- class change, like Ascendance above. spellName and spellId=724 are now CONFIRMED (2026-08-31,
+	-- from the Lightwell object's own in-game tooltip: "SpellID: 724") -- cooldown is still a
+	-- placeholder (real retail cooldown is 3 min base, reduced by the Tranquil Spirit talent --
 	-- used as the estimate here since there's nothing more specific to go on for this server).
-	{ id = "LIGHTWELL",  label = "Lightwell",         icon = "Interface\\Icons\\Spell_Holy_SummonLightwell", class = "Priest", spellName = "Lightwell",         cooldown = 3 * 60 },
+	-- CONFIRMED (2026-08-31, corrected after misreading the buff tooltip screenshot as a world
+	-- object's): casting Lightwell DOES put a real "Lightwell" buff on the priest -- "You gain
+	-- Lightwell." / "Lightwell fades from you." (CHAT_MSG_SPELL_SELF_BUFF / CHAT_MSG_SPELL_AURA_GONE_SELF,
+	-- a different, older chat-message system than COMBAT_LOG_EVENT_UNFILTERED -- both just happen to
+	-- show up in the same default "Combat Log" chat tab). So aura-scan detection (buffName, the same
+	-- proven technique already working for Evasion) applies here after all.
+	{ id = "LIGHTWELL",  label = "Lightwell",         icon = "Interface\\Icons\\Spell_Holy_SummonLightwell", class = "Priest", spellName = "Lightwell",         buffName = "Lightwell", selfOnly = true, spellId = 724, cooldown = 3 * 60 },
 
 	-- Everything below is mined from RAT (C:\Users\Felix\Desktop\HolyWrath\RAT-master\Rat.lua) --
 	-- per the user (2026-08-30), RAT itself is a TurtleWoW addon, not generic vanilla, so these exact
@@ -1198,7 +1231,10 @@ RBS_CDDebug = false
 RBS_CDState = {}
 RBS_CDRows = {}
 RBS_CDNeedsBuild = false
-local RBS_CD_MAX_ROWS = 12
+-- Bumped from 12 (2026-08-31): the static roster-based list can now show one row per (ability,
+-- eligible class member) pair instead of only per active cooldown -- a 25-person raid with several
+-- tracked abilities enabled can easily need more than a dozen rows at once.
+local RBS_CD_MAX_ROWS = 60
 local RBS_CD_ROW_GAP = 2
 -- Renamed in spirit but not in name to keep this diff small: with no title bar anymore (see
 -- RBS_CreateCDFrame), this is just a small top padding instead of "room for the title text".
@@ -1297,10 +1333,10 @@ function RBS_OnCombatLogCooldowns()
 	-- prints EVERY combat log event where the LOCAL PLAYER is the source, regardless of spell name, so
 	-- a real cast's actual arg2/arg10 layout can be read directly instead of guessed at.
 	if RBS_CDDebug and arg4 == UnitName("player") then
-		DEFAULT_CHAT_FRAME:AddMessage(
-			"|cFF00CCFFRaidBuffStatus CD debug:|r arg2=" .. tostring(arg2) .. " arg4=" .. tostring(arg4)
-				.. " arg9=" .. tostring(arg9) .. " arg10=" .. tostring(arg10)
-		)
+		local dbgMsg = "CD debug: arg2=" .. tostring(arg2) .. " arg4=" .. tostring(arg4)
+			.. " arg9=" .. tostring(arg9) .. " arg10=" .. tostring(arg10)
+		DEFAULT_CHAT_FRAME:AddMessage("|cFF00CCFFRaidBuffStatus:|r " .. dbgMsg)
+		RBS_LogDebug(dbgMsg)
 	end
 
 	if arg2 ~= "SPELL_CAST_SUCCESS" then
@@ -1310,7 +1346,11 @@ function RBS_OnCombatLogCooldowns()
 	local track = RaidBuffStatusConfig.CDTrack or {}
 	for i = 1, table.getn(RBS_CD_LIST), 1 do
 		local def = RBS_CD_LIST[i]
-		if track[def.id] and arg10 == def.spellName then
+		-- Matches by spellId (arg9) too when an entry has one -- more robust than a bare name
+		-- string compare (rank suffixes, stray whitespace, etc). Currently only Lightwell has a
+		-- confirmed spellId (724, read off its own in-game tooltip); harmless no-op for every other
+		-- entry, which just falls back to the name-only match.
+		if track[def.id] and (arg10 == def.spellName or (def.spellId and arg9 == def.spellId)) then
 			if RBS_GroupMemberClass(arg4) == def.class then
 				RBS_SetCDReady(def.id .. "|" .. arg4, def.cooldown)
 			end
@@ -1447,11 +1487,26 @@ local function RBS_BuildOneCDRow(i)
 	-- visible, matching the scale fix this time.
 	row.cooldown = nil
 
+	-- Background bar behind the text (2026-08-31, per the user's reference screenshots): plain
+	-- WHITE8X8-tinted texture, the same flat-panel trick documented in this project's CLAUDE.md and
+	-- used elsewhere in this addon, just applied to one row instead of a whole window. On the
+	-- "BACKGROUND" layer so it draws behind timerText/text below regardless of creation order (WoW
+	-- layers, not z-order by creation, decide draw order for sibling regions). Color is set per-tick
+	-- in RBS_UpdateCooldowns (green-tinted when ready, red-tinted when on cooldown) -- fixed width
+	-- rather than hugging the text exactly, so every row reads as a uniform bar like the reference.
+	local bg = row:CreateTexture(nil, "BACKGROUND")
+	bg:SetPoint("LEFT", icon, "RIGHT", 2, 0)
+	bg:SetPoint("TOP", row, "TOP", 0, 0)
+	bg:SetPoint("BOTTOM", row, "BOTTOM", 0, 0)
+	bg:SetWidth(168)
+	bg:SetTexture("Interface\\Buttons\\WHITE8X8")
+	row.bg = bg
+
 	-- Big yellow countdown right next to the icon -- the same RGB Holyward's own
 	-- SerenityGraphicalTimer.lua uses for its countdown label, matching the screenshot the user gave
 	-- (icon + native swipe + a bold yellow "0:13", no boxed panel around any of it).
 	local timerText = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-	timerText:SetPoint("LEFT", icon, "RIGHT", 4, 0)
+	timerText:SetPoint("LEFT", icon, "RIGHT", 8, 0)
 	timerText:SetJustifyH("Left")
 	timerText:SetTextColor(1, 0.82, 0)
 	row.timerText = timerText
@@ -1496,12 +1551,15 @@ function RBS_ApplyCDIconSize(newSize)
 	end
 end
 
--- Rebuilds the visible row list from RBS_CDState every tick: assigns one pooled row per still-active
--- (ability, caster) cooldown, hides the rest, and prunes expired entries out of RBS_CDState as it
--- goes (safe to clear the CURRENT key of a table mid-`pairs()` traversal per the Lua manual -- only
--- adding a NEW key during traversal is undefined). Row order isn't stable between ticks (`pairs()`
--- order isn't guaranteed) -- a cosmetic reshuffle while several cooldowns are active, not a
--- correctness bug; not worth a sort for a first version of this feature.
+-- Rebuilds a STATIC, roster-based row list every tick (2026-08-31, per the user, who wants the same
+-- always-visible "who's up / who's on cooldown" style other raid-cooldown addons use, screenshotted
+-- for reference -- NOT the previous behavior, where a row only ever appeared once a cooldown was
+-- actually witnessed and disappeared again once it expired). For every ENABLED tracked ability,
+-- every CURRENT raid/party member of the matching class gets a permanent row: "Ready" (green) if no
+-- cooldown is known for them right now, or a red countdown if RBS_CDState has one. Expired
+-- RBS_CDState/CDSaved entries are still pruned first, same as before (safe to clear the CURRENT key
+-- of a table mid-`pairs()` traversal per the Lua manual -- only adding a NEW key during traversal is
+-- undefined).
 local function RBS_UpdateCooldowns()
 	if not RaidBuffStatusConfig.CDEnabled then
 		-- The CONTAINER is never hidden (see RBS_CreateCDFrame's comment) -- only the rows, so any
@@ -1524,48 +1582,86 @@ local function RBS_UpdateCooldowns()
 	-- below to already be non-nil.
 	local iconSize = RaidBuffStatusConfig.CDIconSize or 20
 	local track = RaidBuffStatusConfig.CDTrack or {}
-
 	local now = GetTime()
-	local activeRows = 0
 
 	for key, readyAt in pairs(RBS_CDState) do
-		local remaining = readyAt - now
-		if remaining <= 0 then
+		if (readyAt - now) <= 0 then
 			RBS_CDState[key] = nil
 			if RaidBuffStatusConfig.CDSaved then
 				RaidBuffStatusConfig.CDSaved[key] = nil
 			end
-		else
-			local sep = string.find(key, "|", 1, true)
-			local id = string.sub(key, 1, sep - 1)
-			local caster = string.sub(key, sep + 1)
-			if track[id] then
-				local def = nil
-				for i = 1, table.getn(RBS_CD_LIST), 1 do
-					if RBS_CD_LIST[i].id == id then
-						def = RBS_CD_LIST[i]
-						break
-					end
+		end
+	end
+
+	local roster = {}
+	if GetNumRaidMembers() > 0 then
+		for i = 1, GetNumRaidMembers(), 1 do
+			local unit = "raid" .. i
+			if UnitExists(unit) then
+				local name = UnitName(unit)
+				local okClass, class = pcall(UnitClass, unit)
+				if name and okClass then
+					table.insert(roster, { name = name, class = class })
 				end
-				if def and activeRows < RBS_CD_MAX_ROWS then
+			end
+		end
+	else
+		local okSelf, selfClass = pcall(UnitClass, "player")
+		if okSelf then
+			table.insert(roster, { name = UnitName("player"), class = selfClass })
+		end
+		for i = 1, GetNumPartyMembers(), 1 do
+			local unit = "party" .. i
+			if UnitExists(unit) then
+				local name = UnitName(unit)
+				local okClass, class = pcall(UnitClass, unit)
+				if name and okClass then
+					table.insert(roster, { name = name, class = class })
+				end
+			end
+		end
+	end
+
+	local activeRows = 0
+	for a = 1, table.getn(RBS_CD_LIST), 1 do
+		local def = RBS_CD_LIST[a]
+		if track[def.id] then
+			for p = 1, table.getn(roster), 1 do
+				local person = roster[p]
+				if person.class == def.class and activeRows < RBS_CD_MAX_ROWS then
 					activeRows = activeRows + 1
 					local row = RBS_CDRows[activeRows]
 					if row then
+						local readyAt = RBS_CDState[def.id .. "|" .. person.name]
+						local remaining = 0
+						if readyAt then
+							remaining = readyAt - now
+						end
+
 						row.icon:SetTexture(def.icon)
-						if row.cooldown and CooldownFrame_SetTimer then
-							-- start = the moment the cast actually happened (readyAt minus the full
-							-- cooldown length), duration = the full cooldown -- same math Holyward's
-							-- own SerenityGraphicalTimer.lua uses (there stored as TimeMax-Time).
-							pcall(CooldownFrame_SetTimer, row.cooldown, readyAt - def.cooldown, def.cooldown, 1)
-						end
 						if RaidBuffStatusConfig.CDShowLabels then
-							row.text:SetText(caster .. " -- " .. def.label)
+							row.text:SetText(person.name .. " -- " .. def.label)
 						else
-							row.text:SetText(caster)
+							row.text:SetText(person.name)
 						end
-						local mins = math.floor(remaining / 60)
-						local secs = math.floor(math.mod(remaining, 60))
-						row.timerText:SetText(string.format("%d:%02d", mins, secs))
+
+						if remaining > 0 then
+							if row.cooldown and CooldownFrame_SetTimer then
+								-- start = the moment the cast actually happened (readyAt minus the
+								-- full cooldown length), duration = the full cooldown.
+								pcall(CooldownFrame_SetTimer, row.cooldown, readyAt - def.cooldown, def.cooldown, 1)
+							end
+							local mins = math.floor(remaining / 60)
+							local secs = math.floor(math.mod(remaining, 60))
+							row.timerText:SetTextColor(1, 0.3, 0.3)
+							row.timerText:SetText(string.format("%d:%02d", mins, secs))
+							row.bg:SetVertexColor(0.35, 0.08, 0.08, 0.75)
+						else
+							row.timerText:SetTextColor(0.3, 1, 0.3)
+							row.timerText:SetText("Ready")
+							row.bg:SetVertexColor(0.08, 0.3, 0.1, 0.75)
+						end
+
 						row:ClearAllPoints()
 						row:SetPoint(
 							"TOPLEFT", RaidBuffStatusCDFrame, "TOPLEFT", 0,
@@ -1584,10 +1680,10 @@ local function RBS_UpdateCooldowns()
 		end
 	end
 
-	-- No empty-state text anymore (2026-08-30) -- matching the borderless Holyward look, the frame
-	-- should show literally nothing when there's nothing on cooldown, not a placeholder message.
-	-- The container itself is never hidden/shown here at all (see RBS_CreateCDFrame) -- an "empty"
-	-- state is just zero visible rows, since the container draws nothing of its own.
+	-- No empty-state text anymore -- matching the borderless Holyward look, the frame should show
+	-- literally nothing when there's nothing to list (e.g. no tracked ability's class is present in
+	-- the group), not a placeholder message. The container itself is never hidden/shown here at all
+	-- (see RBS_CreateCDFrame).
 	RaidBuffStatusCDFrame:SetHeight(RBS_CD_TITLE_H + math.max(activeRows, 1) * (iconSize + RBS_CD_ROW_GAP) + 4)
 end
 
@@ -1685,6 +1781,7 @@ function RBS_OnAddonLoaded()
 	RaidBuffStatusConfig.AutoRemoveSalvation = RaidBuffStatusConfig.AutoRemoveSalvation or false
 	RaidBuffStatusConfig.FightStartMisses = RaidBuffStatusConfig.FightStartMisses or false
 	RaidBuffStatusConfig.FightStartMissesDuration = RaidBuffStatusConfig.FightStartMissesDuration or 8
+	RaidBuffStatusConfig.DebugLog = RaidBuffStatusConfig.DebugLog or {}
 	RaidBuffStatusConfig.CDTrack = RaidBuffStatusConfig.CDTrack or {}
 	for i = 1, table.getn(RBS_CD_LIST), 1 do
 		local id = RBS_CD_LIST[i].id
@@ -1879,6 +1976,7 @@ function RBS_OnLoad()
 			DEFAULT_CHAT_FRAME:AddMessage(
 				"|cFF00CCFFRaidBuffStatus:|r auras on " .. tostring(UnitName(unit)) .. " (" .. unit .. "):"
 			)
+			RBS_LogDebug("auradump: auras on " .. tostring(UnitName(unit)) .. " (" .. unit .. "):")
 			local index = 1
 			local count = 0
 			while true do
@@ -1888,9 +1986,11 @@ function RBS_OnLoad()
 				end
 				count = count + 1
 				DEFAULT_CHAT_FRAME:AddMessage("  " .. index .. ": " .. tostring(aura.name))
+				RBS_LogDebug("  " .. index .. ": " .. tostring(aura.name))
 				index = index + 1
 			end
 			DEFAULT_CHAT_FRAME:AddMessage("  (" .. count .. " total)")
+			RBS_LogDebug("  (" .. count .. " total)")
 			return
 		end
 		if msg == "debug" then
