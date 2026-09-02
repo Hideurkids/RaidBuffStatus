@@ -406,17 +406,9 @@ local function CreateCooldownsTab()
 				RBS_ApplyCDIconSize(value)
 			end,
 		},
-		showLabels = {
-			type = "toggle", order = 3, width = "full",
-			name = "Show ability name",
-			desc = "Shows the ability name next to the caster's name in each row. Turn off to show just the caster's name (more compact).",
-			get = function()
-				return RaidBuffStatusConfig.CDShowLabels
-			end,
-			set = function(info, value)
-				RaidBuffStatusConfig.CDShowLabels = value
-			end,
-		},
+		-- "Show ability name" toggle removed (2026-08-31, per the user): rows now always show just
+		-- the caster's name (no more "-- Ability" suffix) -- the row's own icon already identifies
+		-- which ability it is, so the option had nothing left to toggle.
 		trackHeader = {
 			type = "header", order = 4,
 			name = "Track which abilities",

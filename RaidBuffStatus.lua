@@ -29,9 +29,6 @@ RaidBuffStatusConfig.DeathWarnings = RaidBuffStatusConfig.DeathWarnings or false
 RaidBuffStatusConfig.TauntWarnings = RaidBuffStatusConfig.TauntWarnings or false
 RaidBuffStatusConfig.CDEnabled = RaidBuffStatusConfig.CDEnabled or false
 RaidBuffStatusConfig.CDIconSize = RaidBuffStatusConfig.CDIconSize or 20
-if RaidBuffStatusConfig.CDShowLabels == nil then
-	RaidBuffStatusConfig.CDShowLabels = true
-end
 RaidBuffStatusConfig.MockingBlowAnnounce = RaidBuffStatusConfig.MockingBlowAnnounce or false
 RaidBuffStatusConfig.AutoRemoveSalvation = RaidBuffStatusConfig.AutoRemoveSalvation or false
 -- Per the user (2026-08-31): kept as its own independent option rather than bundled into a single
@@ -61,7 +58,7 @@ end
 -- actually running, without having to ask the user to check -- also flags whether a stale/second
 -- copy of this addon (e.g. a leftover install of the old reference folder reusing the same global
 -- names) might be clobbering these functions after this file loads.
-RBS_BUILD = "v53-persistent-debug-log"
+RBS_BUILD = "v55-cd-contrast-fix"
 
 -- CONFIRMED via real raid testing (2026-08-31): right after a disconnect/reconnect (server kick,
 -- zone in, etc.), C_UnitAuras.GetAuraDataByIndex can return NOTHING for a window of several
@@ -1487,36 +1484,45 @@ local function RBS_BuildOneCDRow(i)
 	-- visible, matching the scale fix this time.
 	row.cooldown = nil
 
-	-- Background bar behind the text (2026-08-31, per the user's reference screenshots): plain
-	-- WHITE8X8-tinted texture, the same flat-panel trick documented in this project's CLAUDE.md and
-	-- used elsewhere in this addon, just applied to one row instead of a whole window. On the
-	-- "BACKGROUND" layer so it draws behind timerText/text below regardless of creation order (WoW
-	-- layers, not z-order by creation, decide draw order for sibling regions). Color is set per-tick
-	-- in RBS_UpdateCooldowns (green-tinted when ready, red-tinted when on cooldown) -- fixed width
-	-- rather than hugging the text exactly, so every row reads as a uniform bar like the reference.
-	local bg = row:CreateTexture(nil, "BACKGROUND")
-	bg:SetPoint("LEFT", icon, "RIGHT", 2, 0)
-	bg:SetPoint("TOP", row, "TOP", 0, 0)
-	bg:SetPoint("BOTTOM", row, "BOTTOM", 0, 0)
-	bg:SetWidth(168)
-	bg:SetTexture("Interface\\Buttons\\WHITE8X8")
-	row.bg = bg
+	-- Real cooldown PROGRESS bar behind the text (2026-08-31, per the user's reference screenshot),
+	-- not just a flat-colored panel -- a genuine StatusBar (WHITE8X8-tinted, the same flat-panel
+	-- trick documented in this project's CLAUDE.md, just driven as a bar instead of a static
+	-- backdrop) that drains from full to empty over the ability's cooldown, red while counting down
+	-- and full green once ready. Fixed width rather than hugging the text exactly, so every row
+	-- reads as a uniform bar like the reference. StatusBar's own fill naturally draws behind
+	-- child/sibling OVERLAY-layer text, so creation order here doesn't matter for stacking.
+	local bar = CreateFrame("StatusBar", nil, row)
+	bar:SetPoint("LEFT", icon, "RIGHT", 2, 0)
+	bar:SetPoint("TOP", row, "TOP", 0, 0)
+	bar:SetPoint("BOTTOM", row, "BOTTOM", 0, 0)
+	bar:SetWidth(168)
+	bar:SetStatusBarTexture("Interface\\Buttons\\WHITE8X8")
+	bar:SetMinMaxValues(0, 1)
+	bar:SetValue(1)
+	row.bar = bar
 
-	-- Big yellow countdown right next to the icon -- the same RGB Holyward's own
-	-- SerenityGraphicalTimer.lua uses for its countdown label, matching the screenshot the user gave
-	-- (icon + native swipe + a bold yellow "0:13", no boxed panel around any of it).
+	-- Countdown text -- just "R" when ready (2026-08-31, per the user: save space, the icon already
+	-- says which ability this is) or "M:SS" while on cooldown. OUTLINE added (2026-08-31, per the
+	-- user: too dark, text needs to stand out against the bar/background) -- same technique already
+	-- used for the main dashboard's icon count text (GetFont() first, then re-apply with "OUTLINE").
 	local timerText = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
 	timerText:SetPoint("LEFT", icon, "RIGHT", 8, 0)
 	timerText:SetJustifyH("Left")
+	local timerFont, timerFontSize = timerText:GetFont()
+	timerText:SetFont(timerFont, timerFontSize, "OUTLINE")
 	timerText:SetTextColor(1, 0.82, 0)
 	row.timerText = timerText
 
-	-- Caster + ability name -- smaller and secondary, trailing after the countdown, since Holyward's
-	-- own single-target timer doesn't need this at all (it only ever tracks the local player's own
-	-- ability) but this addon tracks a whole raid, so SOME identifying text has to stay somewhere.
+	-- Caster name only (2026-08-31, per the user: drop the ability label too, same reasoning as the
+	-- "R" change above -- the icon already tells you which ability this row is for). Explicit white
+	-- + OUTLINE, same reasoning as timerText above -- GameFontNormalSmall's own default color alone
+	-- wasn't standing out enough against the bar.
 	local text = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
 	text:SetPoint("LEFT", timerText, "RIGHT", 6, 0)
 	text:SetJustifyH("Left")
+	local textFont, textFontSize = text:GetFont()
+	text:SetFont(textFont, textFontSize, "OUTLINE")
+	text:SetTextColor(1, 1, 1)
 	row.text = text
 
 	row:Hide()
@@ -1639,27 +1645,29 @@ local function RBS_UpdateCooldowns()
 						end
 
 						row.icon:SetTexture(def.icon)
-						if RaidBuffStatusConfig.CDShowLabels then
-							row.text:SetText(person.name .. " -- " .. def.label)
-						else
-							row.text:SetText(person.name)
-						end
+						-- Name only (2026-08-31, per the user): the icon already identifies the
+						-- ability, no need to spell it out again in the label too.
+						row.text:SetText(person.name)
 
 						if remaining > 0 then
-							if row.cooldown and CooldownFrame_SetTimer then
-								-- start = the moment the cast actually happened (readyAt minus the
-								-- full cooldown length), duration = the full cooldown.
-								pcall(CooldownFrame_SetTimer, row.cooldown, readyAt - def.cooldown, def.cooldown, 1)
-							end
+							-- Progress bar drains from full to empty over the cooldown -- MinMax is
+							-- the full cooldown length, Value is however much is still left.
+							row.bar:SetMinMaxValues(0, def.cooldown)
+							row.bar:SetValue(remaining)
+							-- Brighter/more saturated (2026-08-31, per the user: "too dark", matching
+							-- the punchier reds/greens from the reference screenshots) -- fully opaque
+							-- too, instead of the earlier semi-transparent 0.85.
+							row.bar:SetStatusBarColor(0.75, 0.1, 0.1, 1)
 							local mins = math.floor(remaining / 60)
 							local secs = math.floor(math.mod(remaining, 60))
 							row.timerText:SetTextColor(1, 0.3, 0.3)
 							row.timerText:SetText(string.format("%d:%02d", mins, secs))
-							row.bg:SetVertexColor(0.35, 0.08, 0.08, 0.75)
 						else
-							row.timerText:SetTextColor(0.3, 1, 0.3)
-							row.timerText:SetText("Ready")
-							row.bg:SetVertexColor(0.08, 0.3, 0.1, 0.75)
+							row.bar:SetMinMaxValues(0, 1)
+							row.bar:SetValue(1)
+							row.bar:SetStatusBarColor(0.15, 0.65, 0.2, 1)
+							row.timerText:SetTextColor(0.4, 1, 0.4)
+							row.timerText:SetText("R")
 						end
 
 						row:ClearAllPoints()
@@ -1759,7 +1767,7 @@ end
 -- addon's `## SavedVariablesPerCharacter` global from disk (a full table REASSIGNMENT, not a merge)
 -- only AFTER that addon's own TOC-listed files finish executing -- right when it fires ADDON_LOADED
 -- for that addon. On an existing character whose saved file predates a field added THIS session
--- (CDEnabled/CDIconSize/CDShowLabels/CDTrack all didn't exist in any save made before today), that
+-- (CDEnabled/CDIconSize/CDTrack all didn't exist in any save made before today), that
 -- restore overwrites RaidBuffStatusConfig with the OLD saved table, which simply doesn't have the
 -- new fields -- wiping out the fresh defaults this file's own top-level code had just set moments
 -- earlier. Every OLDER field (Enabled/IconSize/AutoInvite/DeathWarnings/TauntWarnings) was invisible
@@ -1774,9 +1782,6 @@ function RBS_OnAddonLoaded()
 	RaidBuffStatusConfig.TauntWarnings = RaidBuffStatusConfig.TauntWarnings or false
 	RaidBuffStatusConfig.CDEnabled = RaidBuffStatusConfig.CDEnabled or false
 	RaidBuffStatusConfig.CDIconSize = RaidBuffStatusConfig.CDIconSize or 20
-	if RaidBuffStatusConfig.CDShowLabels == nil then
-		RaidBuffStatusConfig.CDShowLabels = true
-	end
 	RaidBuffStatusConfig.MockingBlowAnnounce = RaidBuffStatusConfig.MockingBlowAnnounce or false
 	RaidBuffStatusConfig.AutoRemoveSalvation = RaidBuffStatusConfig.AutoRemoveSalvation or false
 	RaidBuffStatusConfig.FightStartMisses = RaidBuffStatusConfig.FightStartMisses or false
