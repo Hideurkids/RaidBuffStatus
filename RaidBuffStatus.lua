@@ -58,7 +58,7 @@ end
 -- actually running, without having to ask the user to check -- also flags whether a stale/second
 -- copy of this addon (e.g. a leftover install of the old reference folder reusing the same global
 -- names) might be clobbering these functions after this file loads.
-RBS_BUILD = "v55-cd-contrast-fix"
+RBS_BUILD = "v56-cd-text-zorder-fix"
 
 -- CONFIRMED via real raid testing (2026-08-31): right after a disconnect/reconnect (server kick,
 -- zone in, etc.), C_UnitAuras.GetAuraDataByIndex can return NOTHING for a window of several
@@ -1489,8 +1489,7 @@ local function RBS_BuildOneCDRow(i)
 	-- trick documented in this project's CLAUDE.md, just driven as a bar instead of a static
 	-- backdrop) that drains from full to empty over the ability's cooldown, red while counting down
 	-- and full green once ready. Fixed width rather than hugging the text exactly, so every row
-	-- reads as a uniform bar like the reference. StatusBar's own fill naturally draws behind
-	-- child/sibling OVERLAY-layer text, so creation order here doesn't matter for stacking.
+	-- reads as a uniform bar like the reference.
 	local bar = CreateFrame("StatusBar", nil, row)
 	bar:SetPoint("LEFT", icon, "RIGHT", 2, 0)
 	bar:SetPoint("TOP", row, "TOP", 0, 0)
@@ -1501,12 +1500,21 @@ local function RBS_BuildOneCDRow(i)
 	bar:SetValue(1)
 	row.bar = bar
 
+	-- CONFIRMED (2026-08-31): parenting these to `row` (rather than `bar`) made the text vanish
+	-- entirely once the bar became a real StatusBar. A StatusBar is a genuine CHILD FRAME, not a
+	-- plain texture region -- child FRAMES draw as a unit relative to their parent's OWN regions
+	-- (by frame level), so `bar`'s fill was covering `row`'s directly-attached FontStrings no matter
+	-- what layer they were on; the BACKGROUND/OVERLAY layer ordering that worked for the old flat
+	-- Texture bg only applies to regions sharing the SAME frame. Parenting the text to `bar` itself
+	-- puts them in that one frame's own region set, where OVERLAY-over-ARTWORK ordering is
+	-- guaranteed.
+	--
 	-- Countdown text -- just "R" when ready (2026-08-31, per the user: save space, the icon already
 	-- says which ability this is) or "M:SS" while on cooldown. OUTLINE added (2026-08-31, per the
 	-- user: too dark, text needs to stand out against the bar/background) -- same technique already
 	-- used for the main dashboard's icon count text (GetFont() first, then re-apply with "OUTLINE").
-	local timerText = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-	timerText:SetPoint("LEFT", icon, "RIGHT", 8, 0)
+	local timerText = bar:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+	timerText:SetPoint("LEFT", bar, "LEFT", 4, 0)
 	timerText:SetJustifyH("Left")
 	local timerFont, timerFontSize = timerText:GetFont()
 	timerText:SetFont(timerFont, timerFontSize, "OUTLINE")
@@ -1517,7 +1525,7 @@ local function RBS_BuildOneCDRow(i)
 	-- "R" change above -- the icon already tells you which ability this row is for). Explicit white
 	-- + OUTLINE, same reasoning as timerText above -- GameFontNormalSmall's own default color alone
 	-- wasn't standing out enough against the bar.
-	local text = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+	local text = bar:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
 	text:SetPoint("LEFT", timerText, "RIGHT", 6, 0)
 	text:SetJustifyH("Left")
 	local textFont, textFontSize = text:GetFont()
