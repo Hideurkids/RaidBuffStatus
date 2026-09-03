@@ -66,7 +66,7 @@ end
 -- actually running, without having to ask the user to check -- also flags whether a stale/second
 -- copy of this addon (e.g. a leftover install of the old reference folder reusing the same global
 -- names) might be clobbering these functions after this file loads.
-RBS_BUILD = "v65-cd-row-size-scaling"
+RBS_BUILD = "v66-bl-faction-gate-tranquility"
 
 -- CONFIRMED via real raid testing (2026-08-31): right after a disconnect/reconnect (server kick,
 -- zone in, etc.), C_UnitAuras.GetAuraDataByIndex can return NOTHING for a window of several
@@ -1353,8 +1353,12 @@ RBS_CD_LIST = {
 	-- talent-scan module below (RBS_TalentGate_*) to optionally hide a person's row if they're
 	-- confirmed to lack the talent. Lightwell and Mana Tide Totem were explicitly confirmed BASELINE
 	-- by the user, so they're deliberately left without this field.
-	{ id = "BLOODLUST",  label = "Bloodlust",         icon = "Interface\\Icons\\Spell_Nature_BloodLust",     class = "Shaman", spellName = "Bloodlust",         buffName = "Bloodlust",         cooldown = 10 * 60, talentGated = true },
-	{ id = "HEROISM",    label = "Heroism",           icon = "Interface\\Icons\\Spell_Nature_BloodLust",     class = "Shaman", spellName = "Heroism",           buffName = "Heroism",           cooldown = 10 * 60, talentGated = true },
+	-- faction (2026-09-03, per the user: a single Shaman was showing BOTH rows at once, "2 veces el
+	-- BL") -- Bloodlust/Heroism are the exact same spell, just named per faction; nobody can ever
+	-- have both. Gates each entry to only the roster members of that faction (see the `faction` check
+	-- next to `person.class == def.class` in RBS_UpdateCooldowns) instead of matching every Shaman.
+	{ id = "BLOODLUST",  label = "Bloodlust",         icon = "Interface\\Icons\\Spell_Nature_BloodLust",     class = "Shaman", spellName = "Bloodlust",         buffName = "Bloodlust",         cooldown = 10 * 60, talentGated = true, faction = "Horde" },
+	{ id = "HEROISM",    label = "Heroism",           icon = "Interface\\Icons\\Spell_Nature_BloodLust",     class = "Shaman", spellName = "Heroism",           buffName = "Heroism",           cooldown = 10 * 60, talentGated = true, faction = "Alliance" },
 	-- UNCONFIRMED: not a vanilla-era ability (added in Wrath) -- spellName/cooldown/icon/buffName are
 	-- all placeholders for whatever TWoW/OctoWoW's own version of this is.
 	{ id = "SPIRITLINK", label = "Spirit Link Totem", icon = "Interface\\Icons\\Spell_Nature_SpiritLink",    class = "Shaman", spellName = "Spirit Link Totem", buffName = "Spirit Link Totem", cooldown = 3 * 60, talentGated = true },
@@ -1399,6 +1403,14 @@ RBS_CD_LIST = {
 	{ id = "DIVINESHIELD",      label = "Divine Shield",         icon = "Interface\\Icons\\Spell_Holy_DivineIntervention",  class = "Paladin", spellName = "Divine Shield",         buffName = "Divine Shield", selfOnly = true, cooldown = 5 * 60 },
 	{ id = "DIVINEINTERVENTION",label = "Divine Intervention",   icon = "Interface\\Icons\\Spell_Nature_TimeStop",          class = "Paladin", spellName = "Divine Intervention",   cooldown = 60 * 60 },
 	{ id = "CHALLENGINGROAR",   label = "Challenging Roar",      icon = "Interface\\Icons\\Ability_Druid_ChallangingRoar",  class = "Druid",   spellName = "Challenging Roar",      cooldown = 10 * 60 },
+	-- Added 2026-09-03, per the user. Icon confirmed via the vendored Babble-Spell table
+	-- (RaidBuffStatusSpellIcons.lua, "Spell_Nature_Tranquility"), and RBS_ResolveCDIcon will also try
+	-- the live C_Spell.GetSpellInfo("Tranquility") lookup first regardless. cooldown = 8 min is a
+	-- vanilla-era estimate, UNCONFIRMED against this server's actual tooltip -- use /rbs cddebug or
+	-- /rbs cdstate once tested to correct it if wrong. No buffName: a channeled heal like this
+	-- doesn't leave a clean discrete aura to scan for the way a selfOnly buff does -- relies on the
+	-- UNIT_CASTEVENT detection path instead (see RBS_OnUnitCastEvent), same as Kick/Challenging Shout.
+	{ id = "TRANQUILITY",       label = "Tranquility",           icon = "Interface\\Icons\\Spell_Nature_Tranquility",       class = "Druid",   spellName = "Tranquility",            cooldown = 8 * 60 },
 	{ id = "MANATIDE",          label = "Mana Tide Totem",       icon = "Interface\\Icons\\Spell_Frost_SummonWaterElemental",class = "Shaman",  spellName = "Mana Tide Totem",       buffName = "Mana Tide Totem", cooldown = 5 * 60 },
 	{ id = "REINCARNATION",     label = "Reincarnation",         icon = "Interface\\Icons\\Spell_Nature_Reincarnation",     class = "Shaman",  spellName = "Reincarnation",         cooldown = 30 * 60 },
 	-- UNCONFIRMED even that this HAS a meaningful spell cooldown at all in vanilla-era data (it may
@@ -2166,23 +2178,26 @@ local function RBS_UpdateCooldowns()
 			if UnitExists(unit) then
 				local name = UnitName(unit)
 				local okClass, class = pcall(UnitClass, unit)
+				local okFaction, faction = pcall(UnitFactionGroup, unit)
 				if name and okClass then
-					table.insert(roster, { name = name, class = class })
+					table.insert(roster, { name = name, class = class, faction = okFaction and faction or nil })
 				end
 			end
 		end
 	else
 		local okSelf, selfClass = pcall(UnitClass, "player")
 		if okSelf then
-			table.insert(roster, { name = UnitName("player"), class = selfClass })
+			local okSelfFaction, selfFaction = pcall(UnitFactionGroup, "player")
+			table.insert(roster, { name = UnitName("player"), class = selfClass, faction = okSelfFaction and selfFaction or nil })
 		end
 		for i = 1, GetNumPartyMembers(), 1 do
 			local unit = "party" .. i
 			if UnitExists(unit) then
 				local name = UnitName(unit)
 				local okClass, class = pcall(UnitClass, unit)
+				local okFaction, faction = pcall(UnitFactionGroup, unit)
 				if name and okClass then
-					table.insert(roster, { name = name, class = class })
+					table.insert(roster, { name = name, class = class, faction = okFaction and faction or nil })
 				end
 			end
 		end
@@ -2224,7 +2239,12 @@ local function RBS_UpdateCooldowns()
 					if def.talentGated and RaidBuffStatusConfig.TalentScanEnabled then
 						talentBlocked = (RBS_TalentGate_Has(person.name, def.id) == false)
 					end
-					if person.class == def.class and not talentBlocked and activeRows < RBS_CD_MAX_ROWS then
+					-- Faction gate (2026-09-03, per the user): only Bloodlust/Heroism set def.faction
+					-- right now -- harmless no-op for every other entry, which has no faction field at
+					-- all. If UnitFactionGroup ever fails to resolve (nil), fail OPEN rather than
+					-- hiding the row outright -- same reasoning as the talent gate above.
+					local factionBlocked = def.faction and person.faction and person.faction ~= def.faction
+					if person.class == def.class and not talentBlocked and not factionBlocked and activeRows < RBS_CD_MAX_ROWS then
 						activeRows = activeRows + 1
 						local readyAt = RBS_CDState[def.id .. "|" .. person.name]
 						local remaining = 0
