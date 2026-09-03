@@ -302,9 +302,17 @@ local function CreateHealersTab()
 		name = "Healers",
 		type = "group",
 		args = {
-			placeholder = {
-				type = "description", order = 1,
-				name = "No settings here yet.",
+			-- Ported from Holyward (2026-09-02, per the user).
+			mouseoverCast = {
+				type = "toggle", order = 1, width = "full",
+				name = "Mouseover casting",
+				desc = "Every spell/item used from ANY action bar targets whatever unit is under your mouse instead of your current target -- lets you heal off a raid frame without changing target.",
+				get = function()
+					return RaidBuffStatusConfig.MouseoverCast
+				end,
+				set = function(info, value)
+					RaidBuffStatusConfig.MouseoverCast = value
+				end,
 			},
 		},
 	}
@@ -409,6 +417,21 @@ local function CreateCooldownsTab()
 		-- "Show ability name" toggle removed (2026-08-31, per the user): rows now always show just
 		-- the caster's name (no more "-- Ability" suffix) -- the row's own icon already identifies
 		-- which ability it is, so the option had nothing left to toggle.
+		talentHeader = {
+			type = "header", order = 3,
+			name = "Experimental",
+		},
+		talentScan = {
+			type = "toggle", order = 3.5, width = "full",
+			name = "Hide talent-gated rows for people without the talent",
+			desc = "Ascendance, Bloodlust, Heroism and Spirit Link Totem are talent picks on this server, not baseline class abilities -- not every Priest/Shaman has them. When on, this inspects Priests/Shamans in your raid/party (one at a time, only while in range, cached per-person for the session) and hides that person's row for one of these four abilities if they're confirmed NOT to have the talent. Experimental: relies on the Inspect API and a name-match against their talent list, and a row stays visible until the scan actually confirms they lack it.",
+			get = function()
+				return RaidBuffStatusConfig.TalentScanEnabled
+			end,
+			set = function(info, value)
+				RaidBuffStatusConfig.TalentScanEnabled = value
+			end,
+		},
 		trackHeader = {
 			type = "header", order = 4,
 			name = "Track which abilities",
@@ -490,9 +513,10 @@ local function RaidBuffStatusOptions_Initialize()
 	local configFrame = AceGUI:Create("Frame")
 	configFrame:Hide()
 
-	-- Smaller than Holyward's own 625x700, but wide enough for the tab row across the top (General/
-	-- RaidAssist/Healers/Tanks/Cooldowns) and tall enough for the Cooldowns tab's per-ability list.
-	Dialog:SetDefaultSize(APP_NAME, 420, 320)
+	-- Taller (2026-09-02, per the user: the window read as too squat/cramped) -- still narrower than
+	-- Holyward's own 625x700, but enough vertical room for the Tanks tab's 4 checkboxes + slider and
+	-- the Cooldowns tab's long per-ability list without either one feeling cramped.
+	Dialog:SetDefaultSize(APP_NAME, 420, 480)
 	Dialog:Open(APP_NAME, configFrame)
 	configFrame:SetLayout("Fill")
 

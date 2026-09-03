@@ -35,6 +35,11 @@ RaidBuffStatusConfig.AutoRemoveSalvation = RaidBuffStatusConfig.AutoRemoveSalvat
 -- umbrella "mode" switch, same as MockingBlowAnnounce/AutoRemoveSalvation above.
 RaidBuffStatusConfig.FightStartMisses = RaidBuffStatusConfig.FightStartMisses or false
 RaidBuffStatusConfig.FightStartMissesDuration = RaidBuffStatusConfig.FightStartMissesDuration or 8
+-- Ported from Holyward (2026-09-02, per the user): "cast whatever's under the mouse instead of
+-- your target" for every action bar. See the HEALER UTILITIES section below for the actual hook.
+RaidBuffStatusConfig.MouseoverCast = RaidBuffStatusConfig.MouseoverCast or false
+-- Experimental (2026-09-02, per the user): see the TALENT SCAN section below.
+RaidBuffStatusConfig.TalentScanEnabled = RaidBuffStatusConfig.TalentScanEnabled or false
 
 -- Persisted debug trace (2026-08-31): every RBS_XXXDebug print (CD debug, Soulstone debug, taunt
 -- debug, /rbs auradump) ALSO goes here, not just to chat -- this table lives inside
@@ -58,7 +63,7 @@ end
 -- actually running, without having to ask the user to check -- also flags whether a stale/second
 -- copy of this addon (e.g. a leftover install of the old reference folder reusing the same global
 -- names) might be clobbering these functions after this file loads.
-RBS_BUILD = "v56-cd-text-zorder-fix"
+RBS_BUILD = "v61-live-spellinfo-icon-resolve"
 
 -- CONFIRMED via real raid testing (2026-08-31): right after a disconnect/reconnect (server kick,
 -- zone in, etc.), C_UnitAuras.GetAuraDataByIndex can return NOTHING for a window of several
@@ -414,6 +419,8 @@ local function RBS_BuffIcon_OnEnter()
 			end
 		end
 
+		GameTooltip:AddLine(" ")
+		GameTooltip:AddLine("Left-click: announce to raid/party.", 0.6, 0.6, 0.6)
 		GameTooltip:Show()
 		return
 	end
@@ -432,6 +439,8 @@ local function RBS_BuffIcon_OnEnter()
 	GameTooltip:AddLine("Missing:", 1, 0.3, 0.3)
 	GameTooltip:AddLine(RBS_JoinNames(missing), 1, 1, 1)
 
+	GameTooltip:AddLine(" ")
+	GameTooltip:AddLine("Left-click: announce.  Right-click: whisper providers to buff.", 0.6, 0.6, 0.6)
 	GameTooltip:Show()
 end
 
@@ -469,6 +478,9 @@ local function RBS_BuildOneIcon(i)
 	btn.rbsCount = count
 	btn.rbsDef = def
 
+	-- Left-click announce / right-click whisper providers (2026-09-02, per the user).
+	btn:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+	btn:SetScript("OnClick", RBS_BuffIcon_OnClick)
 	btn:SetScript("OnEnter", RBS_BuffIcon_OnEnter)
 	btn:SetScript("OnLeave", RBS_BuffIcon_OnLeave)
 
@@ -561,6 +573,143 @@ function RBS_OnSizeChanged()
 	RBS_ReflowIcons()
 end
 
+-- Current raid/party chat channel, or nil if solo (in which case callers fall back to local chat).
+-- Pulled out (2026-09-02) since both RBS_AnnounceMissing and the new per-icon click announce need
+-- the exact same channel logic. Global, NOT local: RBS_BuildOneIcon (which wires up the click
+-- handler that calls this, indirectly) is defined EARLIER in this file -- same ordering rule as
+-- every other cross-section reference in this file.
+function RBS_AnnounceChannel()
+	if GetNumRaidMembers() > 0 then
+		return "RAID"
+	elseif GetNumPartyMembers() > 0 then
+		return "PARTY"
+	end
+	return nil
+end
+
+-- Announces ONE buff def's state to raid/party chat (or local chat if solo) -- extracted
+-- (2026-09-02, per the user) from RBS_AnnounceMissing's per-buff loop body so a single buff icon's
+-- left-click can reuse the exact same logic instead of duplicating it. Soulstone keeps its own
+-- shape (see the comment inline below); every other def uses the plain missing-list format. Skips
+-- silently if there's nothing worth announcing (nobody missing it / no warlocks free) -- callers
+-- that want to tell the CLICKER that nothing needed announcing should check RBS_ScanBuff/
+-- RBS_ScanSoulstone themselves first, same as the tooltip already does. Global for the same
+-- ordering reason as RBS_AnnounceChannel just above.
+function RBS_AnnounceOneBuff(def, channel)
+	if def.special == "soulstone" then
+		-- Soulstone gets its own announce shape (2026-08-30, per the user): RBS_ScanBuff's ordinary
+		-- "missing" semantics don't apply (not everyone is supposed to have one), but "how many
+		-- warlocks are free and haven't thrown theirs yet" is genuinely useful raid info, so it gets
+		-- a dedicated line instead of being skipped outright.
+		local _, warlocks = RBS_ScanSoulstone()
+		local availableNames = {}
+		for w = 1, table.getn(warlocks), 1 do
+			if warlocks[w].remaining <= 0 then
+				table.insert(availableNames, warlocks[w].name)
+			end
+		end
+		local availableCount = table.getn(availableNames)
+		if availableCount > 0 then
+			local list
+			if availableCount > RBS_ANNOUNCE_MAX_NAMES then
+				list = "Too many!"
+			else
+				list = RBS_JoinNames(availableNames)
+			end
+			local plural = ""
+			if availableCount > 1 then
+				plural = "s"
+			end
+			local line = availableCount .. " Soulstone" .. plural .. " not assigned yet: " .. list
+			if channel then
+				SendChatMessage(line, channel)
+			else
+				DEFAULT_CHAT_FRAME:AddMessage("|cFF00CCFFRaidBuffStatus:|r " .. line)
+			end
+		end
+	else
+		local missing = RBS_ScanBuff(def)
+		local missingCount = table.getn(missing)
+		if missingCount > 0 then
+			local list
+			if missingCount > RBS_ANNOUNCE_MAX_NAMES then
+				list = "Too many!"
+			else
+				list = RBS_JoinNames(missing)
+			end
+			local line = def.label .. " = " .. list
+			if channel then
+				SendChatMessage(line, channel)
+			else
+				DEFAULT_CHAT_FRAME:AddMessage("|cFF00CCFFRaidBuffStatus:|r " .. line)
+			end
+		end
+	end
+end
+
+-- Whispers every provider of `def` (2026-09-02, per the user: right-click a buff icon to nudge the
+-- people who can cast it, instead of just announcing to the whole raid) telling them how many
+-- people need it, naming them if there aren't too many. Not meaningful for Soulstone (no fixed
+-- "provider" pool in the same sense) or consumables (no class provides Well Fed/Flask), so both
+-- just print a short explanation instead of whispering anyone. Global for the same ordering reason
+-- as RBS_AnnounceChannel/RBS_AnnounceOneBuff above.
+function RBS_WhisperProvidersForBuff(def)
+	if def.special == "soulstone" then
+		DEFAULT_CHAT_FRAME:AddMessage("|cFF00CCFFRaidBuffStatus:|r Right-click whisper isn't available for Soulstone -- use the Announce button instead.")
+		return
+	end
+	if not def.class then
+		DEFAULT_CHAT_FRAME:AddMessage("|cFF00CCFFRaidBuffStatus:|r " .. def.label .. " is a consumable -- no class provides it to whisper.")
+		return
+	end
+
+	local missing, providers = RBS_ScanBuff(def)
+	local missingCount = table.getn(missing)
+	if missingCount == 0 then
+		DEFAULT_CHAT_FRAME:AddMessage("|cFF00CCFFRaidBuffStatus:|r Nobody is missing " .. def.label .. " -- nothing to whisper.")
+		return
+	end
+	local providerCount = table.getn(providers)
+	if providerCount == 0 then
+		DEFAULT_CHAT_FRAME:AddMessage("|cFF00CCFFRaidBuffStatus:|r No " .. def.class .. " in the group to whisper about " .. def.label .. ".")
+		return
+	end
+
+	local list
+	if missingCount > RBS_ANNOUNCE_MAX_NAMES then
+		list = "Too many!"
+	else
+		list = RBS_JoinNames(missing)
+	end
+	local msg = missingCount .. " people are missing " .. def.label .. " (" .. list .. "), please buff them."
+
+	local playerName = UnitName("player")
+	local whispered = 0
+	for p = 1, providerCount, 1 do
+		if providers[p] ~= playerName then
+			pcall(SendChatMessage, msg, "WHISPER", nil, providers[p])
+			whispered = whispered + 1
+		end
+	end
+	DEFAULT_CHAT_FRAME:AddMessage(
+		"|cFF00CCFFRaidBuffStatus:|r Whispered " .. whispered .. " " .. def.class .. "(s) about " .. def.label .. "."
+	)
+end
+
+-- OnClick for a buff icon (2026-09-02, per the user): left-click announces just this one buff to
+-- raid/party chat, right-click whispers the providers instead. Global for the same ordering reason
+-- as the functions above -- RBS_BuildOneIcon, which wires this up, is defined EARLIER in this file.
+function RBS_BuffIcon_OnClick()
+	if not this.rbsDef then
+		return
+	end
+	if arg1 == "RightButton" then
+		RBS_WhisperProvidersForBuff(this.rbsDef)
+	else
+		RBS_AnnounceOneBuff(this.rbsDef, RBS_AnnounceChannel())
+	end
+end
+
 -- Posts, for every buff currently missing at least one person, one line to raid/party chat (or
 -- just the local chat window if solo) listing who's missing it -- e.g. "Fortitude = Nydeh". A buff
 -- nobody is missing is skipped entirely rather than announcing "(nobody)" as spam.
@@ -575,64 +724,9 @@ local function RBS_AnnounceMissing()
 		return
 	end
 
-	local channel = nil
-	if GetNumRaidMembers() > 0 then
-		channel = "RAID"
-	elseif GetNumPartyMembers() > 0 then
-		channel = "PARTY"
-	end
-
+	local channel = RBS_AnnounceChannel()
 	for b = 1, table.getn(RBS_BUFF_LIST), 1 do
-		local def = RBS_BUFF_LIST[b]
-		if def.special == "soulstone" then
-			-- Soulstone gets its own announce shape (2026-08-30, per the user): RBS_ScanBuff's
-			-- ordinary "missing" semantics don't apply (not everyone is supposed to have one), but
-			-- "how many warlocks are free and haven't thrown theirs yet" is genuinely useful raid
-			-- info, so it gets a dedicated line instead of being skipped outright.
-			local _, warlocks = RBS_ScanSoulstone()
-			local availableNames = {}
-			for w = 1, table.getn(warlocks), 1 do
-				if warlocks[w].remaining <= 0 then
-					table.insert(availableNames, warlocks[w].name)
-				end
-			end
-			local availableCount = table.getn(availableNames)
-			if availableCount > 0 then
-				local list
-				if availableCount > RBS_ANNOUNCE_MAX_NAMES then
-					list = "Too many!"
-				else
-					list = RBS_JoinNames(availableNames)
-				end
-				local plural = ""
-				if availableCount > 1 then
-					plural = "s"
-				end
-				local line = availableCount .. " Soulstone" .. plural .. " not assigned yet: " .. list
-				if channel then
-					SendChatMessage(line, channel)
-				else
-					DEFAULT_CHAT_FRAME:AddMessage("|cFF00CCFFRaidBuffStatus:|r " .. line)
-				end
-			end
-		else
-			local missing = RBS_ScanBuff(def)
-			local missingCount = table.getn(missing)
-			if missingCount > 0 then
-				local list
-				if missingCount > RBS_ANNOUNCE_MAX_NAMES then
-					list = "Too many!"
-				else
-					list = RBS_JoinNames(missing)
-				end
-				local line = def.label .. " = " .. list
-				if channel then
-					SendChatMessage(line, channel)
-				else
-					DEFAULT_CHAT_FRAME:AddMessage("|cFF00CCFFRaidBuffStatus:|r " .. line)
-				end
-			end
-		end
+		RBS_AnnounceOneBuff(RBS_BUFF_LIST[b], channel)
 	end
 end
 
@@ -920,6 +1014,116 @@ function RBS_OnEvent()
 		end
 	elseif event == "CHAT_MSG_COMBAT_SELF_MISSES" then
 		RBS_OnCombatSelfMiss()
+	elseif event == "INSPECT_TALENT_READY" then
+		if RBS_TalentInspectPending then
+			RBS_TalentInspectPending = false
+			-- Shared inspect plumbing (2026-09-02) between the manual "/rbs talentdump" diagnostic
+			-- and the automatic talent-gate scan below -- both go through the same NotifyInspect/
+			-- INSPECT_TALENT_READY pair, so RBS_TalentInspectPurpose says which one asked.
+			if RBS_TalentInspectPurpose == "gating" then
+				RBS_TalentGate_OnInspectReady()
+			else
+				RBS_DumpInspectedTalents()
+			end
+		end
+	end
+end
+
+------------------------------------------------------------------------------------------------------
+-- HEALER UTILITIES: mouseover casting (2026-09-02, per the user, ported from Holyward's own
+-- MouseoverCast feature -- same UseAction-override technique, adapted to this addon's own hidden-
+-- tooltip and Nampower-detection conventions instead of duplicating Holyward's file-local ones).
+--
+-- Overrides the native UseAction (rather than hooking every ActionButtonN's OnClick) so it catches
+-- every action bar, bar page, and bar-swap addon in one place, since ALL of them funnel through this
+-- single Blizzard function to actually use/cast a slot.
+--
+-- Nampower (confirmed present on this client) adds a real engine-side spell queue: a press made
+-- mid-GCD is remembered and fires automatically once the GCD clears -- from the DLL itself, NOT
+-- through another call to UseAction. The classic click-then-SpellTargetUnit approach assumes
+-- synchronous execution (cast happens now or not at all), so under Nampower a queued press would
+-- restore the real target long before the deferred cast actually fires, landing the spell on the
+-- player instead of the mouseover unit. Nampower's own CastSpellByName(name, unit) takes the target
+-- as part of the very call the queue remembers -- one atomic call, no target juggling, queue-safe by
+-- construction -- so that's used whenever Nampower is present; the classic target-swap hack is kept
+-- as a fallback for clients without it (or when the action's spell name can't be resolved).
+------------------------------------------------------------------------------------------------------
+
+local RBS_HasNampower = (GetNampowerVersion ~= nil)
+local RBS_MouseoverTip = nil
+
+do
+	local pass = function() end
+	local orig = UseAction
+	function UseAction(slot, checkCursor, onSelf)
+		if RaidBuffStatusConfig.MouseoverCast and UnitExists("mouseover") and not UnitIsUnit("mouseover", "target") then
+			-- IsConsumableAction guards item/potion slots -- CastSpellByName only resolves spells, so
+			-- those fall through to the classic hack below.
+			if RBS_HasNampower and not IsConsumableAction(slot) then
+				local spellName = GetActionText(slot)
+				if not spellName then
+					if not RBS_MouseoverTip then
+						RBS_MouseoverTip = CreateFrame("GameTooltip", "RaidBuffStatusMouseoverTip", nil, "GameTooltipTemplate")
+						RBS_MouseoverTip:SetOwner(WorldFrame, "ANCHOR_NONE")
+					end
+					RBS_MouseoverTip:ClearLines()
+					RBS_MouseoverTip:SetAction(slot)
+					spellName = getglobal("RaidBuffStatusMouseoverTipTextLeft1") and getglobal("RaidBuffStatusMouseoverTipTextLeft1"):GetText()
+					-- CastSpellByName with just the bare name always casts the HIGHEST known rank --
+					-- read the tooltip's rank line too (e.g. "Rank 1") and fold it into
+					-- "Name(Rank N)", the format CastSpellByName needs to hit that exact rank instead
+					-- of silently upgrading a lower rank kept on the bar to save mana.
+					local rankLine = getglobal("RaidBuffStatusMouseoverTipTextLeft2") and getglobal("RaidBuffStatusMouseoverTipTextLeft2"):GetText()
+					if spellName and rankLine and string.find(rankLine, "Rank", 1, true) then
+						spellName = spellName .. "(" .. rankLine .. ")"
+					end
+					RBS_MouseoverTip:Hide()
+				end
+				if spellName and spellName ~= "" then
+					CastSpellByName(spellName, "mouseover")
+					return
+				end
+			end
+
+			-- Fallback for clients without Nampower (or when the spell name couldn't be resolved):
+			-- still on GCD (or its own cooldown) means this press can't actually cast anything right
+			-- now -- let it through unmodified instead of clearing/restoring the target for nothing.
+			local cdStart, cdDuration = GetActionCooldown(slot)
+			if cdStart and cdStart > 0 and cdDuration and cdDuration > 0 then
+				orig(slot, checkCursor, onSelf)
+				return
+			end
+
+			local _PlaySound = PlaySound
+			local hadTarget = UnitExists("target")
+
+			-- Swap in the mouseover unit for the duration of the cast, muting the "target changed"
+			-- sound so this reads as a normal cast rather than two visible target swaps.
+			PlaySound = pass
+			ClearTarget()
+			PlaySound = _PlaySound
+
+			local autoSelfCast = GetCVar("autoSelfCast")
+			SetCVar("autoSelfCast", "0")
+
+			orig(slot, checkCursor, onSelf)
+
+			if autoSelfCast then
+				SetCVar("autoSelfCast", autoSelfCast)
+			end
+
+			if SpellIsTargeting() then
+				SpellTargetUnit("mouseover")
+			end
+
+			if hadTarget then
+				PlaySound = pass
+				TargetLastTarget()
+				PlaySound = _PlaySound
+			end
+			return
+		end
+		orig(slot, checkCursor, onSelf)
 	end
 end
 
@@ -1139,14 +1343,21 @@ RBS_CD_LIST = {
 	{ id = "BATTLEREZ",  label = "Battle Rez",        icon = "Interface\\Icons\\Spell_Nature_Reincarnation", class = "Druid",  spellName = "Rebirth",           cooldown = 30 * 60 },
 	-- Bloodlust (Horde) / Heroism (Alliance, a TWoW cross-faction addition) share the same icon in
 	-- every era of Blizzard's own data.
-	{ id = "BLOODLUST",  label = "Bloodlust",         icon = "Interface\\Icons\\Spell_Nature_BloodLust",     class = "Shaman", spellName = "Bloodlust",         buffName = "Bloodlust",         cooldown = 10 * 60 },
-	{ id = "HEROISM",    label = "Heroism",           icon = "Interface\\Icons\\Spell_Nature_BloodLust",     class = "Shaman", spellName = "Heroism",           buffName = "Heroism",           cooldown = 10 * 60 },
+	-- talentGated = true (2026-09-02, CONFIRMED by the user): Bloodlust/Heroism/Spirit Link
+	-- Totem/Ascendance are talent picks on this server, not baseline class abilities -- read by the
+	-- talent-scan module below (RBS_TalentGate_*) to optionally hide a person's row if they're
+	-- confirmed to lack the talent. Lightwell and Mana Tide Totem were explicitly confirmed BASELINE
+	-- by the user, so they're deliberately left without this field.
+	{ id = "BLOODLUST",  label = "Bloodlust",         icon = "Interface\\Icons\\Spell_Nature_BloodLust",     class = "Shaman", spellName = "Bloodlust",         buffName = "Bloodlust",         cooldown = 10 * 60, talentGated = true },
+	{ id = "HEROISM",    label = "Heroism",           icon = "Interface\\Icons\\Spell_Nature_BloodLust",     class = "Shaman", spellName = "Heroism",           buffName = "Heroism",           cooldown = 10 * 60, talentGated = true },
 	-- UNCONFIRMED: not a vanilla-era ability (added in Wrath) -- spellName/cooldown/icon/buffName are
 	-- all placeholders for whatever TWoW/OctoWoW's own version of this is.
-	{ id = "SPIRITLINK", label = "Spirit Link Totem", icon = "Interface\\Icons\\Spell_Nature_SpiritLink",    class = "Shaman", spellName = "Spirit Link Totem", buffName = "Spirit Link Totem", cooldown = 3 * 60 },
-	-- UNCONFIRMED: "Ascendance" isn't a vanilla Priest ability -- almost certainly a TWoW/OctoWoW
-	-- class-change talent. spellName/cooldown/icon are all placeholders.
-	{ id = "ASCENDANCE", label = "Ascendance",        icon = "Interface\\Icons\\Spell_Shadow_Shadowform",    class = "Priest", spellName = "Ascendance",        cooldown = 3 * 60 },
+	{ id = "SPIRITLINK", label = "Spirit Link Totem", icon = "Interface\\Icons\\Spell_Nature_SpiritLink",    class = "Shaman", spellName = "Spirit Link Totem", buffName = "Spirit Link Totem", cooldown = 3 * 60, talentGated = true },
+	-- CONFIRMED (2026-09-02, from the user's own in-game spellbook tooltip): "Requires 1 point in
+	-- Spirit of Redemption / Requires 30 points in Holy Talents", "5 min cooldown", "SpellID: 52962"
+	-- -- cooldown updated from the old 3 min guess to the real 5 min, and spellId set so
+	-- RBS_ResolveCDIcon can fetch the real texture instead of relying on the guessed icon path below.
+	{ id = "ASCENDANCE", label = "Ascendance",        icon = "Interface\\Icons\\Spell_Shadow_Shadowform",    class = "Priest", spellName = "Ascendance",        cooldown = 5 * 60, talentGated = true, spellId = 52962 },
 	-- Lightwell isn't a vanilla-era ability (added in TBC) -- likely present here via a TWoW/OctoWoW
 	-- class change, like Ascendance above. spellName and spellId=724 are now CONFIRMED (2026-08-31,
 	-- from the Lightwell object's own in-game tooltip: "SpellID: 724") -- cooldown is still a
@@ -1204,7 +1415,13 @@ RBS_CD_LIST = {
 	-- Same reasoning as Vanish above -- a real, unchanged vanilla ability, added for testing with
 	-- Nydeh. Vanilla base cooldown is 5 min. Unlike Vanish, Evasion's own buff name doesn't collide
 	-- with anything else, so aura-scan detection works cleanly here.
-	{ id = "EVASION",           label = "Evasion",               icon = "Interface\\Icons\\Ability_Evasion",                class = "Rogue",   spellName = "Evasion",               buffName = "Evasion", selfOnly = true, cooldown = 5 * 60 },
+	-- FIXED TWICE (2026-09-02): first guess "Ability_Evasion" wasn't a real file (silently rendered
+	-- blank instead of erroring). Second guess "Ability_Rogue_Evasion" was ALSO wrong -- still just a
+	-- guess from generic memory, never actually verified against this client's real data. CONFIRMED
+	-- correct value, "Spell_Shadow_ShadowWard", comes from RBS_SPELL_ICON_DB (RaidBuffStatusSpellIcons.lua,
+	-- a real vendored name->icon database) and is what RBS_ResolveCDIcon actually uses at runtime --
+	-- this hardcoded field is now just the last-resort fallback if that lookup ever fails.
+	{ id = "EVASION",           label = "Evasion",               icon = "Interface\\Icons\\Spell_Shadow_ShadowWard",        class = "Rogue",   spellName = "Evasion",               buffName = "Evasion", selfOnly = true, cooldown = 5 * 60 },
 	-- Major Soulstone is deliberately NOT duplicated here -- it's already tracked above in
 	-- RBS_BUFF_LIST (the "SOULSTONE" special entry), via aura-scan + the aura tooltip's "Cast by"
 	-- line, which is more accurate than a bare cast-name match would be here.
@@ -1222,6 +1439,63 @@ for RBS_cdInit = 1, table.getn(RBS_CD_LIST), 1 do
 end
 
 RBS_CDDebug = false
+
+-- Dynamic icon resolution (2026-09-02, per the user: some hardcoded icon guesses in RBS_CD_LIST
+-- above render blank/wrong -- e.g. Evasion's own guessed path, "Ability_Evasion", isn't a real
+-- file). Four tiers, most-trustworthy first:
+--   1. Nampower's C_Spell.GetSpellTexture(spellId) when an entry has a CONFIRMED spellId (read off
+--      an in-game tooltip) -- always correct when available, but very few entries have one yet.
+--   2. LIVE name resolution, C_Spell.GetSpellTexture(C_Spell.GetSpellInfo(def.spellName).spellID) --
+--      CONFIRMED real (2026-09-02) via a genuine working WeakestAuras port already installed on
+--      this exact client (D:\...\Interface\Addons\WeakestAuras\GenericTrigger.lua's own
+--      WA.ResolveSpellID, lines ~487-517): C_Spell.GetSpellInfo(input) is NOT limited to a numeric
+--      spellID -- ClassicAPI backs it with the client's own live spell cache, and it also accepts a
+--      spell NAME directly, resolving against the FULL client spell database, not just the local
+--      player's own known spellbook. This is the actual answer to the user's "how does weakaura
+--      find icons by name" question, and it's a BETTER answer than tier 3 below for anything
+--      TWoW/OctoWoW-specific (Ascendance, Lightwell, Battle Rez, ...) -- those spells were never in
+--      vanilla at all, so a vanilla-era static table could never have them, but the live client
+--      cache genuinely has whatever this exact server actually shipped. Per WeakestAuras' own
+--      comment, this cache can be cold right after ADDON_LOADED/login -- harmless here since
+--      RBS_ResolveCDIcon only ever runs from RBS_UpdateCooldowns's per-tick loop, long after login;
+--      a resolved id is cached in RBS_ResolvedSpellIdCache, an unresolved one just retries next tick.
+--   3. RBS_SPELL_ICON_DB[def.spellName] (RaidBuffStatusSpellIcons.lua) -- the vendored Babble-Spell
+--      name->icon static table (the SAME kind of bundled data most classic-era addons that resolve
+--      icons by name actually rely on) -- kept as a fallback for a spell tier 2 can't yet resolve
+--      (cache still cold, transient issue, etc). Covers ~1000 real vanilla spell names.
+--   4. def.icon, the original hardcoded guess -- last resort only.
+RBS_ResolvedSpellIdCache = {}
+
+local function RBS_ResolveCDIcon(def)
+	if def.spellId and C_Spell and C_Spell.GetSpellTexture then
+		local ok, texture = pcall(C_Spell.GetSpellTexture, def.spellId)
+		if ok and texture and texture ~= "" then
+			return texture
+		end
+	end
+
+	if def.spellName and C_Spell and C_Spell.GetSpellInfo and C_Spell.GetSpellTexture then
+		local resolvedId = RBS_ResolvedSpellIdCache[def.id]
+		if not resolvedId then
+			local okInfo, info = pcall(C_Spell.GetSpellInfo, def.spellName)
+			if okInfo and info and info.spellID then
+				resolvedId = info.spellID
+				RBS_ResolvedSpellIdCache[def.id] = resolvedId
+			end
+		end
+		if resolvedId then
+			local ok, texture = pcall(C_Spell.GetSpellTexture, resolvedId)
+			if ok and texture and texture ~= "" then
+				return texture
+			end
+		end
+	end
+
+	if def.spellName and RBS_SPELL_ICON_DB and RBS_SPELL_ICON_DB[def.spellName] then
+		return "Interface\\Icons\\" .. RBS_SPELL_ICON_DB[def.spellName]
+	end
+	return def.icon
+end
 
 -- ["ID|CasterName"] = GetTime() value the cooldown ends. Global for the same cross-function-
 -- visibility reason as RBS_BuffIcons/RBS_HeaderBuilt above.
@@ -1533,6 +1807,15 @@ local function RBS_BuildOneCDRow(i)
 	text:SetTextColor(1, 1, 1)
 	row.text = text
 
+	-- Right-click announce + tooltip (2026-09-02, per the user). A plain Frame (not a Button), so
+	-- there's no RegisterForClicks -- EnableMouse + OnMouseDown reading arg1 for which button, same
+	-- as this project's own established pattern elsewhere (OnMouseUp is confirmed unreliable on a
+	-- plain CreateFrame("Frame") on this client).
+	row:EnableMouse(true)
+	row:SetScript("OnMouseDown", RBS_CDRow_OnClick)
+	row:SetScript("OnEnter", RBS_CDRow_OnEnter)
+	row:SetScript("OnLeave", RBS_CDRow_OnLeave)
+
 	row:Hide()
 	RBS_CDRows[i] = row
 end
@@ -1574,6 +1857,63 @@ end
 -- RBS_CDState/CDSaved entries are still pruned first, same as before (safe to clear the CURRENT key
 -- of a table mid-`pairs()` traversal per the Lua manual -- only adding a NEW key during traversal is
 -- undefined).
+-- CD row right-click announce + tooltip (2026-09-02, per the user). Global, not local -- these are
+-- wired into RBS_BuildOneCDRow via SetScript, which sits earlier in the file (see this project's
+-- own established ordering rule in CLAUDE.md: a local referenced by code defined earlier in the
+-- file resolves as a nil global at that earlier call site).
+function RBS_CDRow_FindDef(abilityId)
+	for i = 1, table.getn(RBS_CD_LIST), 1 do
+		if RBS_CD_LIST[i].id == abilityId then
+			return RBS_CD_LIST[i]
+		end
+	end
+	return nil
+end
+
+function RBS_CDRow_StatusText()
+	local remaining = this.rbsRemaining or 0
+	if remaining > 0 then
+		local mins = math.floor(remaining / 60)
+		local secs = math.floor(math.mod(remaining, 60))
+		return string.format("%d:%02d remaining", mins, secs)
+	end
+	return "Ready"
+end
+
+function RBS_CDRow_OnEnter()
+	local def = RBS_CDRow_FindDef(this.rbsAbilityId)
+	if not def or not this.rbsCaster then
+		return
+	end
+	GameTooltip:SetOwner(this, "ANCHOR_RIGHT")
+	GameTooltip:AddLine(def.label, 1, 1, 1)
+	GameTooltip:AddLine(this.rbsCaster .. " -- " .. RBS_CDRow_StatusText(), 0.8, 0.8, 0.8)
+	GameTooltip:AddLine(" ")
+	GameTooltip:AddLine("Right-click: announce to raid/party.", 0.6, 0.6, 0.6)
+	GameTooltip:Show()
+end
+
+function RBS_CDRow_OnLeave()
+	GameTooltip:Hide()
+end
+
+function RBS_CDRow_OnClick()
+	if arg1 ~= "RightButton" then
+		return
+	end
+	local def = RBS_CDRow_FindDef(this.rbsAbilityId)
+	if not def or not this.rbsCaster then
+		return
+	end
+	local channel = RBS_AnnounceChannel()
+	local msg = this.rbsCaster .. " -- " .. def.label .. ": " .. RBS_CDRow_StatusText()
+	if channel then
+		pcall(SendChatMessage, msg, channel)
+	else
+		DEFAULT_CHAT_FRAME:AddMessage("|cFF00CCFFRaidBuffStatus:|r " .. msg)
+	end
+end
+
 local function RBS_UpdateCooldowns()
 	if not RaidBuffStatusConfig.CDEnabled then
 		-- The CONTAINER is never hidden (see RBS_CreateCDFrame's comment) -- only the rows, so any
@@ -1636,13 +1976,22 @@ local function RBS_UpdateCooldowns()
 		end
 	end
 
+	-- Experimental talent-gate scan (2026-09-02, per the user) -- no-ops entirely unless the toggle
+	-- is on. Piggybacks on the roster this function already builds every tick instead of scanning it
+	-- separately.
+	RBS_TalentGate_Tick(roster, now)
+
 	local activeRows = 0
 	for a = 1, table.getn(RBS_CD_LIST), 1 do
 		local def = RBS_CD_LIST[a]
 		if track[def.id] then
 			for p = 1, table.getn(roster), 1 do
 				local person = roster[p]
-				if person.class == def.class and activeRows < RBS_CD_MAX_ROWS then
+				local talentBlocked = false
+				if def.talentGated and RaidBuffStatusConfig.TalentScanEnabled then
+					talentBlocked = (RBS_TalentGate_Has(person.name, def.id) == false)
+				end
+				if person.class == def.class and not talentBlocked and activeRows < RBS_CD_MAX_ROWS then
 					activeRows = activeRows + 1
 					local row = RBS_CDRows[activeRows]
 					if row then
@@ -1652,10 +2001,17 @@ local function RBS_UpdateCooldowns()
 							remaining = readyAt - now
 						end
 
-						row.icon:SetTexture(def.icon)
+						row.icon:SetTexture(RBS_ResolveCDIcon(def))
 						-- Name only (2026-08-31, per the user): the icon already identifies the
 						-- ability, no need to spell it out again in the label too.
 						row.text:SetText(person.name)
+
+						-- Stashed for RBS_CDRow_OnClick/OnEnter (2026-09-02, per the user's right-click
+						-- announce + tooltip request) -- the click/hover handlers fire long after this
+						-- loop, so they can't close over any of these locals directly.
+						row.rbsAbilityId = def.id
+						row.rbsCaster = person.name
+						row.rbsRemaining = remaining
 
 						if remaining > 0 then
 							-- Progress bar drains from full to empty over the cooldown -- MinMax is
@@ -1794,6 +2150,8 @@ function RBS_OnAddonLoaded()
 	RaidBuffStatusConfig.AutoRemoveSalvation = RaidBuffStatusConfig.AutoRemoveSalvation or false
 	RaidBuffStatusConfig.FightStartMisses = RaidBuffStatusConfig.FightStartMisses or false
 	RaidBuffStatusConfig.FightStartMissesDuration = RaidBuffStatusConfig.FightStartMissesDuration or 8
+	RaidBuffStatusConfig.MouseoverCast = RaidBuffStatusConfig.MouseoverCast or false
+	RaidBuffStatusConfig.TalentScanEnabled = RaidBuffStatusConfig.TalentScanEnabled or false
 	RaidBuffStatusConfig.DebugLog = RaidBuffStatusConfig.DebugLog or {}
 	RaidBuffStatusConfig.CDTrack = RaidBuffStatusConfig.CDTrack or {}
 	for i = 1, table.getn(RBS_CD_LIST), 1 do
@@ -1822,6 +2180,267 @@ function RBS_OnAddonLoaded()
 end
 
 ------------------------------------------------------------------------------------------------------
+-- TALENT INSPECTION DIAGNOSTIC (2026-09-02, per the user) -- see the "/rbs talentdump" comment
+-- above (in RBS_OnLoad's slash command handler) for the full rationale. Global state so both the
+-- slash command (inside RBS_OnLoad) and the INSPECT_TALENT_READY handler (in RBS_OnEvent, defined
+-- EARLIER in this file -- same ordering rule as every other cross-section reference here) can share
+-- it regardless of definition order.
+------------------------------------------------------------------------------------------------------
+
+RBS_TalentInspectUnit = nil
+RBS_TalentInspectPending = false
+-- "diagnostic" (the /rbs talentdump command) or "gating" (the automatic scan below) -- says which
+-- one the current in-flight NotifyInspect request belongs to, since both share one inspect slot.
+RBS_TalentInspectPurpose = nil
+
+function RBS_DumpInspectedTalents()
+	local unit = RBS_TalentInspectUnit
+	if not unit or not UnitExists(unit) then
+		return
+	end
+	local name = UnitName(unit) or "?"
+
+	DEFAULT_CHAT_FRAME:AddMessage("|cFF00CCFFRaidBuffStatus:|r talents for " .. name .. ":")
+	RBS_LogDebug("talentdump: talents for " .. name .. ":")
+
+	local okTabs, numTabs = pcall(GetNumTalentTabs, 1)
+	if not okTabs or not numTabs then
+		local msg = "  GetNumTalentTabs(1) failed or returned nothing -- inspect data may not be ready yet."
+		DEFAULT_CHAT_FRAME:AddMessage(msg)
+		RBS_LogDebug(msg)
+		return
+	end
+
+	local found = 0
+	for tab = 1, numTabs, 1 do
+		local okCount, numTalents = pcall(GetNumTalents, tab, 1)
+		if okCount and numTalents then
+			for idx = 1, numTalents, 1 do
+				local okInfo, talentName, _, _, _, rank, maxRank = pcall(GetTalentInfo, tab, idx, 1)
+				if okInfo and talentName and rank and rank > 0 then
+					found = found + 1
+					local line = "  tab " .. tab .. " idx " .. idx .. ": " .. talentName .. " (" .. rank .. "/" .. tostring(maxRank) .. ")"
+					DEFAULT_CHAT_FRAME:AddMessage(line)
+					RBS_LogDebug(line)
+				end
+			end
+		end
+	end
+
+	if found == 0 then
+		local msg = "  (no talents with points found -- either they have none, or inspect data wasn't ready)"
+		DEFAULT_CHAT_FRAME:AddMessage(msg)
+		RBS_LogDebug(msg)
+	end
+end
+
+------------------------------------------------------------------------------------------------------
+-- TALENT-GATE SCAN (2026-09-02, per the user's "toggle experimental" request) -- design confirmed
+-- across several prior turns: scan Priests/Shamans one at a time, only in range, once per person per
+-- session (cache does NOT persist across /reload -- plain global table, not SavedVariables), retry
+-- on a 30s sweep for anyone still unscanned (out of range, joined late, etc), and re-queue new
+-- roster joins as they happen. Gates ONLY the 4 confirmed talentGated abilities above; every other
+-- CD row is completely unaffected regardless of this toggle. Fails OPEN: an unscanned person's row
+-- stays visible (we don't yet know), it's only hidden once a scan actively confirms they lack the
+-- talent -- matches the user's own "no me sirve" rejection of any approach that could wrongly hide
+-- a row for someone who actually has the cooldown.
+------------------------------------------------------------------------------------------------------
+
+RBS_TalentGateCache = {}      -- [name] = { [abilityId] = true/false }
+RBS_TalentGateKnownNames = {} -- [name] = true, once queued/cached at least once this session
+RBS_TalentGateQueue = {}      -- ordered list of names waiting to be inspected
+RBS_TalentGateQueued = {}     -- [name] = true while name is sitting in RBS_TalentGateQueue
+RBS_TalentGateInFlight = nil  -- name currently NotifyInspect'd, or nil
+RBS_TalentGateRequestedAt = 0
+RBS_TalentGateLastSweep = 0
+RBS_TALENT_GATE_TIMEOUT = 5
+RBS_TALENT_GATE_SWEEP_INTERVAL = 30
+
+-- The 4 talent labels we actually look for, read straight off RBS_CD_LIST so there's exactly one
+-- place that ever needs updating if the confirmed-gated list changes.
+function RBS_TalentGate_Classes()
+	local classes = {}
+	for i = 1, table.getn(RBS_CD_LIST), 1 do
+		local def = RBS_CD_LIST[i]
+		if def.talentGated then
+			classes[def.class] = true
+		end
+	end
+	return classes
+end
+
+-- Same name->unit resolution as "/rbs talentdump" above.
+function RBS_TalentGate_ResolveUnit(name)
+	if name == UnitName("player") then
+		return "player"
+	end
+	if GetNumRaidMembers() > 0 then
+		for i = 1, GetNumRaidMembers(), 1 do
+			if UnitName("raid" .. i) == name then
+				return "raid" .. i
+			end
+		end
+	else
+		for i = 1, GetNumPartyMembers(), 1 do
+			if UnitName("party" .. i) == name then
+				return "party" .. i
+			end
+		end
+	end
+	return nil
+end
+
+function RBS_TalentGate_Has(name, abilityId)
+	local cached = RBS_TalentGateCache[name]
+	if not cached then
+		return nil
+	end
+	return cached[abilityId]
+end
+
+-- BUG FIX (2026-09-02, confirmed by the user's own screenshot: toggle on, Ascendance row still
+-- showing for themself even though their own spellbook tooltip shows "Rank 0/1"): NotifyInspect on
+-- yourself doesn't reliably fire INSPECT_TALENT_READY on this client, so the local player's own row
+-- was stuck permanently uncached (and therefore permanently fail-open/visible) by the queue path
+-- below. You don't need to inspect yourself at all -- GetTalentInfo(tab, idx) with NO inspect flag
+-- (as opposed to GetTalentInfo(tab, idx, 1) used for a real inspect target) reads your own live
+-- talents directly and synchronously, no server round-trip needed.
+function RBS_TalentGate_ScanSelf()
+	local talentNames = {}
+	local okTabs, numTabs = pcall(GetNumTalentTabs)
+	if okTabs and numTabs then
+		for tab = 1, numTabs, 1 do
+			local okCount, numTalents = pcall(GetNumTalents, tab)
+			if okCount and numTalents then
+				for idx = 1, numTalents, 1 do
+					local okInfo, talentName, _, _, _, rank = pcall(GetTalentInfo, tab, idx)
+					if okInfo and talentName and rank and rank > 0 then
+						talentNames[talentName] = true
+					end
+				end
+			end
+		end
+	end
+
+	local result = {}
+	for i = 1, table.getn(RBS_CD_LIST), 1 do
+		local def = RBS_CD_LIST[i]
+		if def.talentGated then
+			result[def.id] = talentNames[def.label] and true or false
+		end
+	end
+	RBS_TalentGateCache[UnitName("player")] = result
+end
+
+-- Called from RBS_UpdateCooldowns's own per-tick roster build so it always sees the current roster
+-- without a second scan of its own. Queues new Priests/Shamans on sight, plus a full re-sweep of
+-- still-unscanned ones every RBS_TALENT_GATE_SWEEP_INTERVAL seconds (catches someone who joined out
+-- of range, or whose earlier inspect timed out).
+function RBS_TalentGate_Tick(roster, now)
+	if not RaidBuffStatusConfig.TalentScanEnabled then
+		return
+	end
+
+	local gatedClasses = RBS_TalentGate_Classes()
+	local dueForSweep = (now - RBS_TalentGateLastSweep) >= RBS_TALENT_GATE_SWEEP_INTERVAL
+	local playerName = UnitName("player")
+
+	for p = 1, table.getn(roster), 1 do
+		local person = roster[p]
+		if gatedClasses[person.class] and not RBS_TalentGateCache[person.name] then
+			if person.name == playerName then
+				RBS_TalentGate_ScanSelf()
+			else
+				local isNew = not RBS_TalentGateKnownNames[person.name]
+				if (isNew or dueForSweep) and not RBS_TalentGateQueued[person.name] and person.name ~= RBS_TalentGateInFlight then
+					table.insert(RBS_TalentGateQueue, person.name)
+					RBS_TalentGateQueued[person.name] = true
+				end
+			end
+			RBS_TalentGateKnownNames[person.name] = true
+		end
+	end
+
+	if dueForSweep then
+		RBS_TalentGateLastSweep = now
+	end
+
+	-- One at a time (2026-09-02, per the user's own performance question -- keeps this to a single
+	-- native inspect call in flight regardless of how many Priests/Shamans are present).
+	if RBS_TalentGateInFlight then
+		if (now - RBS_TalentGateRequestedAt) > RBS_TALENT_GATE_TIMEOUT then
+			-- No response in time (out of range/zoned/etc) -- drop it uncached, the next sweep will
+			-- retry. Don't touch RBS_TalentInspectPending here: it may since have been claimed by an
+			-- unrelated "/rbs talentdump" call, which owns clearing its own flag.
+			RBS_TalentGateInFlight = nil
+		end
+		return
+	end
+
+	while table.getn(RBS_TalentGateQueue) > 0 do
+		local name = table.remove(RBS_TalentGateQueue, 1)
+		RBS_TalentGateQueued[name] = nil
+		if not RBS_TalentGateCache[name] then
+			local unit = RBS_TalentGate_ResolveUnit(name)
+			if unit and UnitExists(unit) then
+				local okRange, inRange = pcall(CheckInteractDistance, unit, 1)
+				if okRange and inRange == 1 then
+					RBS_TalentGateInFlight = name
+					RBS_TalentGateRequestedAt = now
+					RBS_TalentInspectUnit = unit
+					RBS_TalentInspectPending = true
+					RBS_TalentInspectPurpose = "gating"
+					local okNotify = pcall(NotifyInspect, unit)
+					if not okNotify then
+						RBS_TalentGateInFlight = nil
+						RBS_TalentInspectPending = false
+					end
+					return
+				end
+				-- Out of range right now -- leave uncached, the next sweep will try again.
+			end
+		end
+	end
+end
+
+function RBS_TalentGate_OnInspectReady()
+	local name = RBS_TalentGateInFlight
+	local unit = RBS_TalentInspectUnit
+	RBS_TalentGateInFlight = nil
+	if not name or not unit or not UnitExists(unit) then
+		return
+	end
+
+	local talentNames = {}
+	local seenCount = 0
+	local okTabs, numTabs = pcall(GetNumTalentTabs, 1)
+	if okTabs and numTabs then
+		for tab = 1, numTabs, 1 do
+			local okCount, numTalents = pcall(GetNumTalents, tab, 1)
+			if okCount and numTalents then
+				for idx = 1, numTalents, 1 do
+					local okInfo, talentName, _, _, _, rank = pcall(GetTalentInfo, tab, idx, 1)
+					if okInfo and talentName and rank and rank > 0 then
+						talentNames[talentName] = true
+						seenCount = seenCount + 1
+					end
+				end
+			end
+		end
+	end
+
+	local result = {}
+	for i = 1, table.getn(RBS_CD_LIST), 1 do
+		local def = RBS_CD_LIST[i]
+		if def.talentGated then
+			result[def.id] = talentNames[def.label] and true or false
+		end
+	end
+	RBS_TalentGateCache[name] = result
+	RBS_LogDebug("talentgate: cached " .. name .. " (" .. seenCount .. " ranked talents seen)")
+end
+
+------------------------------------------------------------------------------------------------------
 -- LOAD / UPDATE / SLASH COMMAND
 ------------------------------------------------------------------------------------------------------
 
@@ -1834,6 +2453,7 @@ function RBS_OnLoad()
 	this:RegisterEvent("CHAT_MSG_SPELL_SELF_DAMAGE")
 	this:RegisterEvent("CHAT_MSG_COMBAT_SELF_MISSES")
 	this:RegisterEvent("PLAYER_REGEN_DISABLED")
+	this:RegisterEvent("INSPECT_TALENT_READY")
 	-- CONFIRMED via Holyward's own tracker-resize grip (Holyward.lua, proven working on this exact
 	-- client): the XML `resizable="true"` attribute alone was NOT enough there either -- an explicit
 	-- SetResizable(true) call is what actually flags the frame resizable on this client.
@@ -2004,6 +2624,59 @@ function RBS_OnLoad()
 			end
 			DEFAULT_CHAT_FRAME:AddMessage("  (" .. count .. " total)")
 			RBS_LogDebug("  (" .. count .. " total)")
+			return
+		end
+		-- "/rbs talentdump <name>" (2026-09-02, per the user: some CD-tracker abilities -- Ascendance,
+		-- Bloodlust, Spirit Link Totem -- are talent-gated on this server, not baseline class
+		-- abilities, so class membership alone isn't enough to say someone can provide them).
+		-- WoW has no API to read another player's talents without inspecting them first --
+		-- NotifyInspect(unit) requests it (must be in inspect range, ~30 yards), and
+		-- INSPECT_TALENT_READY fires once the server responds. This dumps EVERY talent with at least
+		-- one point spent, across all 3 tabs, so the exact tab/index for each ability we care about
+		-- can be read off directly instead of guessed at -- guessing wrong would silently check the
+		-- wrong talent.
+		if string.find(msg, "^talentdump", 1) then
+			local name = string.gsub(msg, "^talentdump%s*", "")
+			local unit = nil
+			if name == "" then
+				unit = "target"
+			elseif name == UnitName("player") then
+				unit = "player"
+			elseif GetNumRaidMembers() > 0 then
+				for i = 1, GetNumRaidMembers(), 1 do
+					if UnitName("raid" .. i) == name then
+						unit = "raid" .. i
+						break
+					end
+				end
+			else
+				for i = 1, GetNumPartyMembers(), 1 do
+					if UnitName("party" .. i) == name then
+						unit = "party" .. i
+						break
+					end
+				end
+			end
+			if not unit or not UnitExists(unit) then
+				DEFAULT_CHAT_FRAME:AddMessage(
+					"|cFF00CCFFRaidBuffStatus:|r no current raid/party member named \"" .. name .. "\" (or no target, if no name given)."
+				)
+				return
+			end
+			RBS_TalentInspectUnit = unit
+			RBS_TalentInspectPending = true
+			RBS_TalentInspectPurpose = "diagnostic"
+			local okNotify = pcall(NotifyInspect, unit)
+			if not okNotify then
+				DEFAULT_CHAT_FRAME:AddMessage(
+					"|cFF00CCFFRaidBuffStatus:|r NotifyInspect failed for " .. tostring(UnitName(unit)) .. " -- are they in range (~30 yards) and visible?"
+				)
+				RBS_TalentInspectPending = false
+			else
+				DEFAULT_CHAT_FRAME:AddMessage(
+					"|cFF00CCFFRaidBuffStatus:|r requested talents for " .. tostring(UnitName(unit)) .. ", waiting for server response..."
+				)
+			end
 			return
 		end
 		if msg == "debug" then
