@@ -66,7 +66,7 @@ end
 -- actually running, without having to ask the user to check -- also flags whether a stale/second
 -- copy of this addon (e.g. a leftover install of the old reference folder reusing the same global
 -- names) might be clobbering these functions after this file loads.
-RBS_BUILD = "v66-bl-faction-gate-tranquility"
+RBS_BUILD = "v67-spiritlink-real-name"
 
 -- CONFIRMED via real raid testing (2026-08-31): right after a disconnect/reconnect (server kick,
 -- zone in, etc.), C_UnitAuras.GetAuraDataByIndex can return NOTHING for a window of several
@@ -1359,9 +1359,18 @@ RBS_CD_LIST = {
 	-- next to `person.class == def.class` in RBS_UpdateCooldowns) instead of matching every Shaman.
 	{ id = "BLOODLUST",  label = "Bloodlust",         icon = "Interface\\Icons\\Spell_Nature_BloodLust",     class = "Shaman", spellName = "Bloodlust",         buffName = "Bloodlust",         cooldown = 10 * 60, talentGated = true, faction = "Horde" },
 	{ id = "HEROISM",    label = "Heroism",           icon = "Interface\\Icons\\Spell_Nature_BloodLust",     class = "Shaman", spellName = "Heroism",           buffName = "Heroism",           cooldown = 10 * 60, talentGated = true, faction = "Alliance" },
-	-- UNCONFIRMED: not a vanilla-era ability (added in Wrath) -- spellName/cooldown/icon/buffName are
-	-- all placeholders for whatever TWoW/OctoWoW's own version of this is.
-	{ id = "SPIRITLINK", label = "Spirit Link Totem", icon = "Interface\\Icons\\Spell_Nature_SpiritLink",    class = "Shaman", spellName = "Spirit Link Totem", buffName = "Spirit Link Totem", cooldown = 3 * 60, talentGated = true },
+	-- CONFIRMED (2026-09-03, real in-game talent tooltip): the real name is just "Spirit Link" -- NOT
+	-- "Spirit Link Totem" as this entry had it before, which is why the icon never resolved (both the
+	-- live C_Spell.GetSpellInfo lookup and the vendored Babble-Spell table need the EXACT real name)
+	-- and very likely why the talent-gate scan's own name-match against GetTalentInfo's real talent
+	-- name silently never matched either (a name mismatch there always evaluates to "doesn't have
+	-- it" for someone who WAS actually scanned -- if it's still showing for someone who lacks it,
+	-- that means their scan hasn't completed at all yet, not that the match itself was wrong; keep
+	-- testing after this fix). Also confirmed a Row-7 Restoration CAPSTONE talent (not baseline),
+	-- confirming the earlier talentGated=true was already correct -- and that taking it REPLACES Mana
+	-- Tide Totem entirely for that Shaman (MANATIDE below is left as-is for now, still shown
+	-- unconditionally -- the mutual-exclusion case is real but out of scope for this specific fix).
+	{ id = "SPIRITLINK", label = "Spirit Link",       icon = "Interface\\Icons\\Spell_Nature_SpiritLink",    class = "Shaman", spellName = "Spirit Link",       buffName = "Spirit Link",       cooldown = 3 * 60, talentGated = true },
 	-- CONFIRMED (2026-09-02, from the user's own in-game spellbook tooltip): "Requires 1 point in
 	-- Spirit of Redemption / Requires 30 points in Holy Talents", "5 min cooldown", "SpellID: 52962"
 	-- -- cooldown updated from the old 3 min guess to the real 5 min, and spellId set so
