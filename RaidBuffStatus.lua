@@ -40,6 +40,9 @@ RaidBuffStatusConfig.FightStartMissesDuration = RaidBuffStatusConfig.FightStartM
 RaidBuffStatusConfig.MouseoverCast = RaidBuffStatusConfig.MouseoverCast or false
 -- Experimental (2026-09-02, per the user): see the TALENT SCAN section below.
 RaidBuffStatusConfig.TalentScanEnabled = RaidBuffStatusConfig.TalentScanEnabled or false
+-- Cooldowns column-wrap row limit (2026-09-03, per the user): 0 means "Sin limite" (one column,
+-- unlimited height) -- see RBS_UpdateCooldowns for where this is actually used.
+RaidBuffStatusConfig.CDRowLimit = RaidBuffStatusConfig.CDRowLimit or 0
 
 -- Persisted debug trace (2026-08-31): every RBS_XXXDebug print (CD debug, Soulstone debug, taunt
 -- debug, /rbs auradump) ALSO goes here, not just to chat -- this table lives inside
@@ -63,7 +66,7 @@ end
 -- actually running, without having to ask the user to check -- also flags whether a stale/second
 -- copy of this addon (e.g. a leftover install of the old reference folder reusing the same global
 -- names) might be clobbering these functions after this file loads.
-RBS_BUILD = "v61-live-spellinfo-icon-resolve"
+RBS_BUILD = "v65-cd-row-size-scaling"
 
 -- CONFIRMED via real raid testing (2026-08-31): right after a disconnect/reconnect (server kick,
 -- zone in, etc.), C_UnitAuras.GetAuraDataByIndex can return NOTHING for a window of several
@@ -1014,6 +1017,8 @@ function RBS_OnEvent()
 		end
 	elseif event == "CHAT_MSG_COMBAT_SELF_MISSES" then
 		RBS_OnCombatSelfMiss()
+	elseif event == "UNIT_CASTEVENT" then
+		RBS_OnUnitCastEvent()
 	elseif event == "INSPECT_TALENT_READY" then
 		if RBS_TalentInspectPending then
 			RBS_TalentInspectPending = false
@@ -1502,6 +1507,10 @@ end
 RBS_CDState = {}
 RBS_CDRows = {}
 RBS_CDNeedsBuild = false
+-- "/rbs overload" (2026-09-03, per the user: a way to visually test the row-limit/column-wrap
+-- feature without needing a real 25-person raid full of matching classes on cooldown). Session-only,
+-- not saved -- resets to off on /reload, same as the other RBS_XXXDebug toggles.
+RBS_CDOverloadTest = false
 -- Bumped from 12 (2026-08-31): the static roster-based list can now show one row per (ability,
 -- eligible class member) pair instead of only per active cooldown -- a 25-person raid with several
 -- tracked abilities enabled can easily need more than a dozen rows at once.
@@ -1510,6 +1519,34 @@ local RBS_CD_ROW_GAP = 2
 -- Renamed in spirit but not in name to keep this diff small: with no title bar anymore (see
 -- RBS_CreateCDFrame), this is just a small top padding instead of "room for the title text".
 local RBS_CD_TITLE_H = 2
+-- Tightened (2026-09-03, per the user: "tendrian que estar mas cerca una de otra") -- column WIDTH
+-- itself is no longer a fixed constant, see RBS_CDRowWidth below; this is just the breathing room
+-- between one column's content and the next.
+local RBS_CD_COL_GAP = 6
+
+-- Row/bar/column geometry all derive from ONE "CD tracker size" setting now (2026-09-03, per the
+-- user: the old "Icon size" option only scaled the icon graphic itself, leaving the progress bar and
+-- the row's own width fixed regardless -- looked disproportionate at small sizes, and left ~10px of
+-- unused slack inside every row on top of the column gap, which is exactly what made columns read as
+-- oddly far apart). RATIO preserves the exact original look at the original default (size=20 ->
+-- bar=168), the same numbers this addon shipped with before this change.
+local RBS_CD_BAR_WIDTH_RATIO = 8.4
+local function RBS_CDBarWidth(size)
+	return math.floor(size * RBS_CD_BAR_WIDTH_RATIO)
+end
+local function RBS_CDRowWidth(size)
+	return size + 2 + RBS_CDBarWidth(size)
+end
+-- Font sizes scale proportionally too (from whatever GameFontNormal/GameFontNormalSmall's own true
+-- baseline size is at size=20, captured once at row-build time -- see RBS_BuildOneCDRow), floored at
+-- 8pt so a very small tracker size never shrinks the text to unreadable/zero.
+local function RBS_CDFontSize(baseSize, size)
+	local scaled = math.floor(baseSize * (size / 20))
+	if scaled < 8 then
+		scaled = 8
+	end
+	return scaled
+end
 
 -- Returns the class of a CURRENT raid/party member with this exact name, or nil if nobody in the
 -- group has that name -- both "is this actually someone in my group" and "what class are they"
@@ -1603,7 +1640,15 @@ function RBS_OnCombatLogCooldowns()
 	-- guessed name never matched anything, or this event never fires for it in the first place). Now
 	-- prints EVERY combat log event where the LOCAL PLAYER is the source, regardless of spell name, so
 	-- a real cast's actual arg2/arg10 layout can be read directly instead of guessed at.
-	if RBS_CDDebug and arg4 == UnitName("player") then
+	--
+	-- Broadened AGAIN (2026-09-03, real raid report: Kick/Challenging Shout/Innervate/AoE taunt all
+	-- fail to track for OTHER group members, only Lightwell -- a selfOnly aura -- works at all). The
+	-- `arg4 == UnitName("player")` restriction above meant this debug print never fired for anyone
+	-- ELSE's cast, so there was never any real data confirming whether COMBAT_LOG_EVENT_UNFILTERED /
+	-- SPELL_CAST_SUCCESS even reaches this client for another group member's actions at all (as
+	-- opposed to being filtered by spell name matching -- a totally different failure). Now logs for
+	-- ANY known group member as source, still gated on RBS_CDDebug so it stays silent by default.
+	if RBS_CDDebug and RBS_GroupMemberClass(arg4) then
 		local dbgMsg = "CD debug: arg2=" .. tostring(arg2) .. " arg4=" .. tostring(arg4)
 			.. " arg9=" .. tostring(arg9) .. " arg10=" .. tostring(arg10)
 		DEFAULT_CHAT_FRAME:AddMessage("|cFF00CCFFRaidBuffStatus:|r " .. dbgMsg)
@@ -1624,6 +1669,91 @@ function RBS_OnCombatLogCooldowns()
 		if track[def.id] and (arg10 == def.spellName or (def.spellId and arg9 == def.spellId)) then
 			if RBS_GroupMemberClass(arg4) == def.class then
 				RBS_SetCDReady(def.id .. "|" .. arg4, def.cooldown)
+			end
+			break
+		end
+	end
+end
+
+-- REAL FIX (2026-09-03, real raid report: Kick/Challenging Shout/Innervate/AoE taunt all fail to
+-- track for OTHER group members -- only Lightwell, a selfOnly aura-scanned buff, works at all).
+-- Root cause, CONFIRMED (not guessed) by reading a real working addon's own source on this machine:
+-- WeakestAuras' own GenericTrigger.lua says outright, twice --
+--   "this client's combat log is SuperWoW's RAW_COMBATLOG, whose adapter does not exist" and
+--   "this client has no combat log to track an arbitrary caster from"
+-- -- meaning COMBAT_LOG_EVENT_UNFILTERED (RBS_OnCombatLogCooldowns above, RBS_OnCombatLogSoulstone
+-- below) was never a real, working detection channel on THIS client for anyone but possibly the
+-- local player by some other coincidence -- explaining why every tracked ability without a buffName
+-- (Kick, Challenging Shout, Challenging Roar -- no dependency on it at all) and Innervate's own
+-- combat-log fallback all came up empty for other people's casts. Left in place as a harmless no-op
+-- fallback rather than ripped out -- it's cheap and may still fire for the local player's own casts.
+--
+-- The actual reliable mechanism, confirmed via a SECOND real working addon's source (Tankalyze,
+-- C:\Users\Felix\Desktop\HolyWrath\Tankalyze-master\Core.lua line ~1401): SuperWoW's OWN
+-- UNIT_CASTEVENT, which per WeakestAuras' own docs "covers every unit" (not self-only, unlike
+-- Nampower's SPELL_GO_SELF). Confirmed real argument order from Tankalyze's actual working handler:
+--   function Tankalyze:UNIT_CASTEVENT(casterGuid, targetGuid, type, spellId, castTime)
+-- i.e. arg1=casterGuid, arg2=targetGuid, arg3=type ("CAST" for a real completed cast -- Tankalyze
+-- itself filters on this), arg4=spellId, arg5=castTime. SpellInfo(spellId), a bare SuperWoW global
+-- (see the CLAUDE.md SuperWoW-detection snippet), resolves the id to a name. Gated on SuperWoW being
+-- present (RBS_HasSuperWoW below) since this event plain doesn't exist without it.
+RBS_HasSuperWoW = (SUPERWOW_VERSION ~= nil) or (SpellInfo ~= nil)
+
+-- Resolves a raid/party roster member's NAME from a GUID via SuperWoW's own extended UnitExists
+-- (returns a 2nd value, that unit's GUID, only when SuperWoW is loaded) -- avoids needing any
+-- GUID<->unit-token table of our own.
+local function RBS_NameFromGuid(guid)
+	if not guid then
+		return nil
+	end
+	local okSelf, existsSelf, selfGuid = pcall(UnitExists, "player")
+	if okSelf and existsSelf and selfGuid == guid then
+		return UnitName("player")
+	end
+	if GetNumRaidMembers() > 0 then
+		for i = 1, GetNumRaidMembers(), 1 do
+			local unit = "raid" .. i
+			local ok, exists, unitGuid = pcall(UnitExists, unit)
+			if ok and exists and unitGuid == guid then
+				return UnitName(unit)
+			end
+		end
+	else
+		for i = 1, GetNumPartyMembers(), 1 do
+			local unit = "party" .. i
+			local ok, exists, unitGuid = pcall(UnitExists, unit)
+			if ok and exists and unitGuid == guid then
+				return UnitName(unit)
+			end
+		end
+	end
+	return nil
+end
+
+function RBS_OnUnitCastEvent()
+	if arg3 ~= "CAST" or not arg1 or not arg4 or not SpellInfo then
+		return
+	end
+
+	local okInfo, spellName = pcall(SpellInfo, arg4)
+	if not okInfo or not spellName then
+		return
+	end
+
+	if RBS_CDDebug then
+		local dbgMsg = "CD castevent: caster=" .. tostring(arg1) .. " spellId=" .. tostring(arg4) .. " name=" .. tostring(spellName)
+		DEFAULT_CHAT_FRAME:AddMessage("|cFF00CCFFRaidBuffStatus:|r " .. dbgMsg)
+		RBS_LogDebug(dbgMsg)
+	end
+
+	local track = RaidBuffStatusConfig.CDTrack or {}
+	for i = 1, table.getn(RBS_CD_LIST), 1 do
+		local def = RBS_CD_LIST[i]
+		-- Matches by spellId too when an entry has one -- same reasoning as RBS_OnCombatLogCooldowns.
+		if track[def.id] and (spellName == def.spellName or (def.spellId and arg4 == def.spellId)) then
+			local casterName = RBS_NameFromGuid(arg1)
+			if casterName and RBS_GroupMemberClass(casterName) == def.class then
+				RBS_SetCDReady(def.id .. "|" .. casterName, def.cooldown)
 			end
 			break
 		end
@@ -1734,10 +1864,8 @@ local function RBS_BuildOneCDRow(i)
 	-- to build even if some future code path calls this before that handler has run.
 	local iconSize = RaidBuffStatusConfig.CDIconSize or 20
 	local row = CreateFrame("Frame", nil, RaidBuffStatusCDFrame)
-	-- Explicit width (2026-08-30): this was never set at all before, defaulting to 0 -- almost
-	-- certainly harmless on its own (children position from their own anchors regardless), but cheap
-	-- to fix while chasing the "literally nothing renders, even the fake /rbs cdtest entry" report.
-	row:SetWidth(200)
+	-- Width now derives from the size setting too (2026-09-03) -- was a bare fixed 200 before.
+	row:SetWidth(RBS_CDRowWidth(iconSize))
 	row:SetHeight(iconSize)
 
 	local icon = row:CreateTexture(nil, "ARTWORK")
@@ -1768,7 +1896,8 @@ local function RBS_BuildOneCDRow(i)
 	bar:SetPoint("LEFT", icon, "RIGHT", 2, 0)
 	bar:SetPoint("TOP", row, "TOP", 0, 0)
 	bar:SetPoint("BOTTOM", row, "BOTTOM", 0, 0)
-	bar:SetWidth(168)
+	-- Scales with the size setting now (2026-09-03) -- was a bare fixed 168 before.
+	bar:SetWidth(RBS_CDBarWidth(iconSize))
 	bar:SetStatusBarTexture("Interface\\Buttons\\WHITE8X8")
 	bar:SetMinMaxValues(0, 1)
 	bar:SetValue(1)
@@ -1790,8 +1919,13 @@ local function RBS_BuildOneCDRow(i)
 	local timerText = bar:CreateFontString(nil, "OVERLAY", "GameFontNormal")
 	timerText:SetPoint("LEFT", bar, "LEFT", 4, 0)
 	timerText:SetJustifyH("Left")
-	local timerFont, timerFontSize = timerText:GetFont()
-	timerText:SetFont(timerFont, timerFontSize, "OUTLINE")
+	-- Base size captured BEFORE the first SetFont call (2026-09-03) -- RBS_ApplyCDIconSize needs the
+	-- template's true original point size to rescale from later, and re-reading GetFont() after
+	-- we've already overridden it would just compound the previous scale instead of resetting it.
+	local timerFont, timerBaseSize = timerText:GetFont()
+	row.timerFont = timerFont
+	row.timerBaseFontSize = timerBaseSize
+	timerText:SetFont(timerFont, RBS_CDFontSize(timerBaseSize, iconSize), "OUTLINE")
 	timerText:SetTextColor(1, 0.82, 0)
 	row.timerText = timerText
 
@@ -1802,8 +1936,10 @@ local function RBS_BuildOneCDRow(i)
 	local text = bar:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
 	text:SetPoint("LEFT", timerText, "RIGHT", 6, 0)
 	text:SetJustifyH("Left")
-	local textFont, textFontSize = text:GetFont()
-	text:SetFont(textFont, textFontSize, "OUTLINE")
+	local textFont, textBaseSize = text:GetFont()
+	row.textFont = textFont
+	row.textBaseFontSize = textBaseSize
+	text:SetFont(textFont, RBS_CDFontSize(textBaseSize, iconSize), "OUTLINE")
 	text:SetTextColor(1, 1, 1)
 	row.text = text
 
@@ -1836,14 +1972,30 @@ end
 
 -- Called from the options window's "Icon size" slider for the Cooldowns tab. Existing pooled rows
 -- were already sized at build time, so those need an explicit resize here.
+-- Rescales the WHOLE row now (2026-09-03, per the user: this used to only touch the icon graphic,
+-- leaving the bar/row width and text a fixed size regardless -- "deberia cambiar por una de tamano
+-- general para todo el tracking de cd"). Row/bar width via RBS_CDRowWidth/RBS_CDBarWidth, font sizes
+-- via RBS_CDFontSize off each row's own captured baseline (see RBS_BuildOneCDRow) so repeated resizes
+-- don't compound. RBS_UpdateCooldowns picks up the new column width on its own next tick (it reads
+-- RBS_CDRowWidth(iconSize) itself), so nothing else needs to happen here for that.
 function RBS_ApplyCDIconSize(newSize)
 	RaidBuffStatusConfig.CDIconSize = newSize
+	local barWidth = RBS_CDBarWidth(newSize)
+	local rowWidth = RBS_CDRowWidth(newSize)
 	for i = 1, RBS_CD_MAX_ROWS, 1 do
 		local row = RBS_CDRows[i]
 		if row then
+			row:SetWidth(rowWidth)
 			row:SetHeight(newSize)
 			row.icon:SetWidth(newSize)
 			row.icon:SetHeight(newSize)
+			row.bar:SetWidth(barWidth)
+			if row.timerFont and row.timerBaseFontSize then
+				row.timerText:SetFont(row.timerFont, RBS_CDFontSize(row.timerBaseFontSize, newSize), "OUTLINE")
+			end
+			if row.textFont and row.textBaseFontSize then
+				row.text:SetFont(row.textFont, RBS_CDFontSize(row.textBaseFontSize, newSize), "OUTLINE")
+			end
 		end
 	end
 end
@@ -1914,6 +2066,64 @@ function RBS_CDRow_OnClick()
 	end
 end
 
+-- Renders/positions one CD row (1-based `activeRows` slot) given a def + caster name + remaining
+-- time. Extracted (2026-09-03) so "/rbs overload"'s synthetic fill below can share the exact same
+-- rendering/column-wrap math as the real roster loop instead of duplicating it.
+local function RBS_RenderCDRow(activeRows, def, casterName, remaining, iconSize, rowLimit)
+	local row = RBS_CDRows[activeRows]
+	if not row then
+		return
+	end
+
+	row.icon:SetTexture(RBS_ResolveCDIcon(def))
+	-- Name only (2026-08-31, per the user): the icon already identifies the ability, no need to
+	-- spell it out again in the label too.
+	row.text:SetText(casterName)
+
+	-- Stashed for RBS_CDRow_OnClick/OnEnter (2026-09-02, per the user's right-click announce +
+	-- tooltip request) -- the click/hover handlers fire long after this runs, so they can't close
+	-- over any of these locals directly.
+	row.rbsAbilityId = def.id
+	row.rbsCaster = casterName
+	row.rbsRemaining = remaining
+
+	if remaining > 0 then
+		-- Progress bar drains from full to empty over the cooldown -- MinMax is the full cooldown
+		-- length, Value is however much is still left.
+		row.bar:SetMinMaxValues(0, def.cooldown)
+		row.bar:SetValue(remaining)
+		row.bar:SetStatusBarColor(0.75, 0.1, 0.1, 1)
+		local mins = math.floor(remaining / 60)
+		local secs = math.floor(math.mod(remaining, 60))
+		row.timerText:SetTextColor(1, 0.3, 0.3)
+		row.timerText:SetText(string.format("%d:%02d", mins, secs))
+	else
+		row.bar:SetMinMaxValues(0, 1)
+		row.bar:SetValue(1)
+		row.bar:SetStatusBarColor(0.15, 0.65, 0.2, 1)
+		row.timerText:SetTextColor(0.4, 1, 0.4)
+		row.timerText:SetText("R")
+	end
+
+	-- Column wrapping (2026-09-03, per the user: a row limit, then wrap into a new column to the
+	-- right instead of growing straight down forever). rowLimit <= 0 means "Sin limite" -- everything
+	-- stays in one column.
+	local rowIndex0 = activeRows - 1
+	local col, rowInCol = 0, rowIndex0
+	if rowLimit > 0 then
+		col = math.floor(rowIndex0 / rowLimit)
+		rowInCol = math.mod(rowIndex0, rowLimit)
+	end
+
+	row:ClearAllPoints()
+	row:SetPoint(
+		"TOPLEFT", RaidBuffStatusCDFrame, "TOPLEFT",
+		col * (RBS_CDRowWidth(iconSize) + RBS_CD_COL_GAP),
+		-RBS_CD_TITLE_H - rowInCol * (iconSize + RBS_CD_ROW_GAP)
+	)
+	row:Show()
+end
+
 local function RBS_UpdateCooldowns()
 	if not RaidBuffStatusConfig.CDEnabled then
 		-- The CONTAINER is never hidden (see RBS_CreateCDFrame's comment) -- only the rows, so any
@@ -1937,6 +2147,8 @@ local function RBS_UpdateCooldowns()
 	local iconSize = RaidBuffStatusConfig.CDIconSize or 20
 	local track = RaidBuffStatusConfig.CDTrack or {}
 	local now = GetTime()
+	-- Row limit before wrapping into a new column (2026-09-03, per the user). 0 = "Sin limite".
+	local rowLimit = RaidBuffStatusConfig.CDRowLimit or 0
 
 	for key, readyAt in pairs(RBS_CDState) do
 		if (readyAt - now) <= 0 then
@@ -1982,64 +2194,44 @@ local function RBS_UpdateCooldowns()
 	RBS_TalentGate_Tick(roster, now)
 
 	local activeRows = 0
-	for a = 1, table.getn(RBS_CD_LIST), 1 do
-		local def = RBS_CD_LIST[a]
-		if track[def.id] then
-			for p = 1, table.getn(roster), 1 do
-				local person = roster[p]
-				local talentBlocked = false
-				if def.talentGated and RaidBuffStatusConfig.TalentScanEnabled then
-					talentBlocked = (RBS_TalentGate_Has(person.name, def.id) == false)
-				end
-				if person.class == def.class and not talentBlocked and activeRows < RBS_CD_MAX_ROWS then
-					activeRows = activeRows + 1
-					local row = RBS_CDRows[activeRows]
-					if row then
+
+	-- "/rbs overload" (2026-09-03, per the user): fills 25 synthetic rows, cycling through
+	-- RBS_CD_LIST regardless of which abilities are actually enabled/tracked and ignoring class
+	-- entirely, so the row-limit/column-wrap feature can be tested visually without a real
+	-- 25-person raid full of matching classes sitting on cooldown. Every 3rd fake row shows Ready;
+	-- the rest show a varied countdown (37s up to ~3:38) so both text widths get exercised too.
+	if RBS_CDOverloadTest then
+		local listCount = table.getn(RBS_CD_LIST)
+		for i = 1, 25, 1 do
+			if activeRows >= RBS_CD_MAX_ROWS or listCount == 0 then
+				break
+			end
+			local def = RBS_CD_LIST[math.mod(i - 1, listCount) + 1]
+			local remaining = 0
+			if math.mod(i, 3) ~= 0 then
+				remaining = 30 + i * 7
+			end
+			activeRows = activeRows + 1
+			RBS_RenderCDRow(activeRows, def, "TestPlayer" .. i, remaining, iconSize, rowLimit)
+		end
+	else
+		for a = 1, table.getn(RBS_CD_LIST), 1 do
+			local def = RBS_CD_LIST[a]
+			if track[def.id] then
+				for p = 1, table.getn(roster), 1 do
+					local person = roster[p]
+					local talentBlocked = false
+					if def.talentGated and RaidBuffStatusConfig.TalentScanEnabled then
+						talentBlocked = (RBS_TalentGate_Has(person.name, def.id) == false)
+					end
+					if person.class == def.class and not talentBlocked and activeRows < RBS_CD_MAX_ROWS then
+						activeRows = activeRows + 1
 						local readyAt = RBS_CDState[def.id .. "|" .. person.name]
 						local remaining = 0
 						if readyAt then
 							remaining = readyAt - now
 						end
-
-						row.icon:SetTexture(RBS_ResolveCDIcon(def))
-						-- Name only (2026-08-31, per the user): the icon already identifies the
-						-- ability, no need to spell it out again in the label too.
-						row.text:SetText(person.name)
-
-						-- Stashed for RBS_CDRow_OnClick/OnEnter (2026-09-02, per the user's right-click
-						-- announce + tooltip request) -- the click/hover handlers fire long after this
-						-- loop, so they can't close over any of these locals directly.
-						row.rbsAbilityId = def.id
-						row.rbsCaster = person.name
-						row.rbsRemaining = remaining
-
-						if remaining > 0 then
-							-- Progress bar drains from full to empty over the cooldown -- MinMax is
-							-- the full cooldown length, Value is however much is still left.
-							row.bar:SetMinMaxValues(0, def.cooldown)
-							row.bar:SetValue(remaining)
-							-- Brighter/more saturated (2026-08-31, per the user: "too dark", matching
-							-- the punchier reds/greens from the reference screenshots) -- fully opaque
-							-- too, instead of the earlier semi-transparent 0.85.
-							row.bar:SetStatusBarColor(0.75, 0.1, 0.1, 1)
-							local mins = math.floor(remaining / 60)
-							local secs = math.floor(math.mod(remaining, 60))
-							row.timerText:SetTextColor(1, 0.3, 0.3)
-							row.timerText:SetText(string.format("%d:%02d", mins, secs))
-						else
-							row.bar:SetMinMaxValues(0, 1)
-							row.bar:SetValue(1)
-							row.bar:SetStatusBarColor(0.15, 0.65, 0.2, 1)
-							row.timerText:SetTextColor(0.4, 1, 0.4)
-							row.timerText:SetText("R")
-						end
-
-						row:ClearAllPoints()
-						row:SetPoint(
-							"TOPLEFT", RaidBuffStatusCDFrame, "TOPLEFT", 0,
-							-RBS_CD_TITLE_H - (activeRows - 1) * (iconSize + RBS_CD_ROW_GAP)
-						)
-						row:Show()
+						RBS_RenderCDRow(activeRows, def, person.name, remaining, iconSize, rowLimit)
 					end
 				end
 			end
@@ -2056,7 +2248,20 @@ local function RBS_UpdateCooldowns()
 	-- literally nothing when there's nothing to list (e.g. no tracked ability's class is present in
 	-- the group), not a placeholder message. The container itself is never hidden/shown here at all
 	-- (see RBS_CreateCDFrame).
-	RaidBuffStatusCDFrame:SetHeight(RBS_CD_TITLE_H + math.max(activeRows, 1) * (iconSize + RBS_CD_ROW_GAP) + 4)
+	--
+	-- Width/height now account for column wrapping (2026-09-03) -- rows fill a column top-to-bottom
+	-- before starting the next one, so every column is exactly rowLimit tall except possibly the
+	-- last (fewer rows). Width matters here even without a visible backdrop: it's this frame's own
+	-- EnableMouse(true)/drag hit-box (RBS_CreateCDFrame), so it has to actually cover every column
+	-- or the rightmost ones become undraggable-from.
+	local numCols = 1
+	local tallestCol = activeRows
+	if rowLimit > 0 and activeRows > rowLimit then
+		numCols = math.floor((activeRows - 1) / rowLimit) + 1
+		tallestCol = rowLimit
+	end
+	RaidBuffStatusCDFrame:SetWidth(numCols * RBS_CDRowWidth(iconSize) + (numCols - 1) * RBS_CD_COL_GAP)
+	RaidBuffStatusCDFrame:SetHeight(RBS_CD_TITLE_H + math.max(tallestCol, 1) * (iconSize + RBS_CD_ROW_GAP) + 4)
 end
 
 -- Built entirely in Lua (no XML) -- same self-contained WHITE8X8 flat-dark-panel trick documented in
@@ -2152,6 +2357,7 @@ function RBS_OnAddonLoaded()
 	RaidBuffStatusConfig.FightStartMissesDuration = RaidBuffStatusConfig.FightStartMissesDuration or 8
 	RaidBuffStatusConfig.MouseoverCast = RaidBuffStatusConfig.MouseoverCast or false
 	RaidBuffStatusConfig.TalentScanEnabled = RaidBuffStatusConfig.TalentScanEnabled or false
+	RaidBuffStatusConfig.CDRowLimit = RaidBuffStatusConfig.CDRowLimit or 0
 	RaidBuffStatusConfig.DebugLog = RaidBuffStatusConfig.DebugLog or {}
 	RaidBuffStatusConfig.CDTrack = RaidBuffStatusConfig.CDTrack or {}
 	for i = 1, table.getn(RBS_CD_LIST), 1 do
@@ -2454,6 +2660,14 @@ function RBS_OnLoad()
 	this:RegisterEvent("CHAT_MSG_COMBAT_SELF_MISSES")
 	this:RegisterEvent("PLAYER_REGEN_DISABLED")
 	this:RegisterEvent("INSPECT_TALENT_READY")
+	-- SuperWoW-only (2026-09-03) -- see RBS_OnUnitCastEvent's own comment for why this is the real
+	-- fix for tracking OTHER group members' Kick/Challenging Shout/Innervate/etc. RegisterEvent
+	-- throws on an event name this client doesn't recognize at all, so this is pcall-wrapped rather
+	-- than gated purely on RBS_HasSuperWoW -- belt and suspenders, since a player without SuperWoW
+	-- should see this addon silently skip the feature, not error out on load.
+	if RBS_HasSuperWoW then
+		pcall(this.RegisterEvent, this, "UNIT_CASTEVENT")
+	end
 	-- CONFIRMED via Holyward's own tracker-resize grip (Holyward.lua, proven working on this exact
 	-- client): the XML `resizable="true"` attribute alone was NOT enough there either -- an explicit
 	-- SetResizable(true) call is what actually flags the frame resizable on this client.
@@ -2569,6 +2783,19 @@ function RBS_OnLoad()
 			DEFAULT_CHAT_FRAME:AddMessage(
 				"|cFF00CCFFRaidBuffStatus:|r Injected a fake 30s Innervate cooldown -- look near the "
 					.. "middle of your screen, slightly above center. Drag it to reposition."
+			)
+			return
+		end
+		-- "/rbs overload" (2026-09-03, per the user): fills the Cooldowns window with 25 synthetic
+		-- rows (RBS_UpdateCooldowns's own RBS_CDOverloadTest branch) so the row-limit/column-wrap
+		-- option can be tested visually without needing a real 25-person raid full of matching
+		-- classes actually on cooldown. Toggle, not one-shot -- run it again to turn it off.
+		if msg == "overload" then
+			RaidBuffStatusConfig.CDEnabled = true
+			RBS_CDOverloadTest = not RBS_CDOverloadTest
+			DEFAULT_CHAT_FRAME:AddMessage(
+				"|cFF00CCFFRaidBuffStatus:|r CD overload test "
+					.. (RBS_CDOverloadTest and "ON -- 25 fake rows injected, try the row-limit option now." or "off.")
 			)
 			return
 		end

@@ -404,8 +404,10 @@ local function CreateCooldownsTab()
 		},
 		iconSize = {
 			type = "range", order = 2, width = "full",
-			name = "Icon size",
-			desc = "Size, in pixels, of each row's icon in the Cooldowns window.",
+			-- Renamed (2026-09-03, per the user): this used to only resize the icon graphic -- now
+			-- it scales the whole row (icon, progress bar, text) together as one overall size.
+			name = "Row size",
+			desc = "Overall size of each row in the Cooldowns window -- icon, progress bar, and text all scale together.",
 			min = 14, max = 32, step = 1,
 			get = function()
 				return RaidBuffStatusConfig.CDIconSize or 20
@@ -417,6 +419,28 @@ local function CreateCooldownsTab()
 		-- "Show ability name" toggle removed (2026-08-31, per the user): rows now always show just
 		-- the caster's name (no more "-- Ability" suffix) -- the row's own icon already identifies
 		-- which ability it is, so the option had nothing left to toggle.
+		rowLimit = {
+			type = "select", order = 2.5, width = "full",
+			name = "Rows before starting a new column",
+			desc = "Once a column reaches this many rows, the Cooldowns window starts a new column to the right instead of growing straight down forever.",
+			-- Numeric keys (2026-09-03): AceConfigDialog's Dropdown control sorts a select's values
+			-- by KEY when no explicit order is given (table.sort over the keys) -- plain numbers sort
+			-- correctly ascending, with 0 ("Sin limite") first, no separate ordering list needed.
+			values = {
+				[0] = "Sin limite",
+				[10] = "10",
+				[15] = "15",
+				[20] = "20",
+				[25] = "25",
+				[30] = "30",
+			},
+			get = function()
+				return RaidBuffStatusConfig.CDRowLimit or 0
+			end,
+			set = function(info, value)
+				RaidBuffStatusConfig.CDRowLimit = value
+			end,
+		},
 		talentHeader = {
 			type = "header", order = 3,
 			name = "Experimental",
