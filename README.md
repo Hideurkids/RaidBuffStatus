@@ -1,8 +1,9 @@
 # RaidBuffStatus
 
-**A raid-wide buff tracker for TurtleWoW/OctoWoW.** One compact, resizable icon bar that shows,
-at a glance, which class buffs each raid or party member is missing — no more asking in chat
-"who doesn't have Fortitude?"
+**A raid-wide buff and cooldown tracker for TurtleWoW/OctoWoW.** One compact, resizable icon bar
+that shows, at a glance, which class buffs each raid or party member is missing — no more asking
+in chat "who doesn't have Fortitude?" — plus a separate raid-cooldown tracker for Innervate,
+Bloodlust, Battle Rez, and more.
 
 <!-- Hero screenshot: the main window with several buff icons, hovering one to show its tooltip -->
 ![RaidBuffStatus overview](./screenshots/overview.jpg)
@@ -11,8 +12,15 @@ at a glance, which class buffs each raid or party member is missing — no more 
 
 RaidBuffStatus watches your current raid or party and, for each tracked buff, tells you two
 things: who in the group can even cast it, and who's currently missing it. Hover any icon for
-the full breakdown, click **Announce** to post a summary to raid/party chat, and drag the grip
-in the corner to resize the window — the icon grid reflows and re-centers itself automatically.
+the full breakdown, left-click to announce that buff's status to raid/party chat, right-click to
+whisper everyone who can provide it and ask them to, or click **Announce** to post a summary of
+every missing buff at once. Drag the grip in the corner to resize the window — the icon grid
+reflows and re-centers itself automatically.
+
+A separate, optional window (the Cooldowns tracker) does the same thing for raid-utility
+cooldowns — Innervate, Bloodlust, Battle Rez, Ascendance, and more — showing one row per person
+who can provide each one, "Ready" in green or a live countdown in red. It works without requiring
+anyone else in the raid to run this addon.
 
 ## Features
 
@@ -20,8 +28,8 @@ in the corner to resize the window — the icon grid reflows and re-centers itse
 One icon per tracked buff, each showing a live count of how many people are missing it (green
 when everyone has it, red otherwise):
 
-- Arcane Intellect, Mark of the Wild / Gift of the Wild, Power Word: Fortitude, Divine Spirit,
-  Shadow Protection
+- Arcane Intellect / Arcane Brilliance, Mark of the Wild / Gift of the Wild, Power Word:
+  Fortitude, Divine Spirit, Shadow Protection
 - All six long-duration Paladin Blessings individually (Might, Kings, Wisdom, Salvation,
   Sanctuary, Light) — Freedom and Protection are deliberately excluded, since those are
   situational defensive cooldowns, not something a raid maintains on everyone
@@ -29,8 +37,14 @@ when everyone has it, red otherwise):
 - **Soulstone** (Warlock) — special-cased: shows who currently carries an active Soulstone, and
   which raid Warlocks are free to cast a new one vs. on this addon's own *approximate* cooldown
   timer (WoW never exposes another player's real spell cooldown through any API, on any client —
-  this is tracked by watching for the Soulstone buff appearing on someone and reading the aura
-  tooltip's "Cast by" line, so it only knows about casts it actually witnessed)
+  this is tracked by watching for a Soulstone cast, via SuperWoW's `UNIT_CASTEVENT` when
+  available, or by watching for the Soulstone buff appearing and reading the aura tooltip's
+  "Cast by" line otherwise)
+
+Left-click any icon to announce that specific buff's status to raid/party chat. Right-click to
+whisper every class member who can provide it, telling them how many people (and, if four or
+fewer, who by name) still need it — not available for Soulstone or the consumables, since there's
+no fixed "provider" for those.
 
 <!-- Screenshot: hovering a buff icon, tooltip showing "Can provide" / "Missing" -->
 ![Buff tooltip](./screenshots/tooltip.png)
@@ -51,10 +65,16 @@ A buff missing from more than a few people prints "Too many!" instead of a long 
 
 ### Death warnings
 Optional (Options → RaidAssist): an on-screen alert, a sound, and a raid/party chat message
-whenever anyone in your group dies — including yourself.
+whenever anyone in your group dies — including yourself. Feign Death is correctly excluded.
 
 <!-- Screenshot: RaidAssist tab, Death warnings option -->
 ![Death warnings option](./screenshots/deathwarnings.png)
+
+### Healer utilities
+- **Mouseover casting** (Options → Healers): every spell or item used from any action bar
+  targets whatever unit is under your mouse instead of your current target — lets you heal off a
+  raid frame without changing target. Uses Nampower's queue-safe cast when available, with a
+  classic target-swap fallback otherwise.
 
 ### Tank tools
 All optional, each independently toggleable in Options → Tanks:
@@ -79,36 +99,52 @@ Optional (Options → RaidAssist): automatically invites anyone who whispers you
 <!-- Screenshot: RaidAssist tab, Auto-invite option -->
 ![Auto-invite option](./screenshots/autoinvite.png)
 
-### Raid cooldown tracker *(BETA — actively being tested, off by default)*
-A separate floating window (icon + countdown, no boxed panel) listing, for every tracked ability,
-every raid/party member of the matching class — **without** requiring anyone else in your raid to
-run this addon. Each row is a permanent "who has this" entry showing either "Ready" (green) or a
-red countdown, so the list stays static instead of icons popping in and out as cooldowns start and
-end. Currently tracks: Innervate, Battle Rez, Bloodlust, Heroism, Spirit Link Totem, Ascendance,
-Lightwell, Shield Wall, Challenging Shout, Berserker Rage, Pummel, Disarm, Lay on Hands, Blessing
-of Protection, Divine Shield, Divine Intervention, Challenging Roar, Mana Tide Totem,
-Reincarnation, Tranquilizing Shot, Kick, Vanish, and Evasion — each individually toggleable in
-Options → Cooldowns (turning off abilities you don't care about keeps the list shorter).
+### Raid cooldown tracker *(BETA, off by default)*
+A separate floating window (icon + a real progress bar, no boxed panel) listing, for every
+tracked ability, every raid/party member of the matching class — **without** requiring anyone
+else in your raid to run this addon. Each row is a permanent "who has this" entry showing either
+"Ready" (green) or a red countdown, so the list stays static instead of icons popping in and out
+as cooldowns start and end.
 
-This is new and still being verified in-game, so a few things are expected to be rough around the
-edges for now:
+Currently tracks: Innervate, Battle Rez, Bloodlust, Heroism, Spirit Link, Ascendance, Lightwell,
+Tranquility, Shield Wall, Challenging Shout, Berserker Rage, Pummel, Disarm, Lay on Hands,
+Blessing of Protection, Divine Shield, Divine Intervention, Challenging Roar, Mana Tide Totem,
+Reincarnation, Tranquilizing Shot, Kick, Vanish, and Evasion — each individually toggleable in
+Options → Cooldowns (turning off abilities you don't care about keeps the list shorter). Bloodlust
+and Heroism are gated to the caster's actual faction, so a single Shaman never shows both.
+
+Detection is layered: most casts are picked up via SuperWoW's `UNIT_CASTEVENT`, which reliably
+covers *any* group member's completed cast (not just your own) when SuperWoW is installed;
+abilities that leave a buff behind (Innervate, Bloodlust, Lightwell, Shield Wall, Divine Shield,
+etc.) are additionally caught by watching for that buff to appear; the older combat-log path is
+kept only as a fallback for players without SuperWoW, since it's confirmed unreliable on this
+client for anyone but possibly yourself.
+
+Row icons resolve in three steps — a confirmed spell ID (via Nampower's `C_Spell.GetSpellTexture`)
+first, then a live name lookup against the client's own spell cache, then a bundled ~1000-entry
+name→icon table — before falling back to a hardcoded guess, so most icons render correctly even
+for abilities this server changed from vanilla.
+
+Right-click a row to announce that ability's status to raid/party chat, and hover for a tooltip.
+Once you have more rows than fit comfortably in one column, set a row limit (Options → Cooldowns)
+and the window wraps into additional columns automatically; **Reset position** puts the window
+back at its default spot if it's been dragged somewhere inconvenient. An **experimental** toggle
+can additionally hide a person's row for a talent-gated ability (Ascendance, Bloodlust, Heroism,
+Spirit Link) if they're confirmed, via a background Inspect scan, not to have the talent.
+
+A few things are still expected to be rough around the edges:
 - Only casts this client actually witnesses *while running* are tracked — a cooldown already in
   progress before you logged in reads as "ready" until the next real cast. (An in-progress
   cooldown DOES survive closing and reopening the game entirely, once it's been witnessed once.)
-- Detection uses two different techniques depending on the ability: most are caught by watching
-  for the resulting buff to appear (Innervate, Bloodlust, Heroism, Shield Wall, Berserker Rage,
-  Divine Shield, Blessing of Protection, Mana Tide Totem, Evasion, Spirit Link Totem, Lightwell);
-  a few rely on the combat log instead, which has been confirmed unreliable for plain self-buffs on
-  this client — so Battle Rez, Vanish, and the various interrupts/taunts currently don't get
-  detected at all.
-- Several exact spell names and cooldown durations (Ascendance, Spirit Link Totem, Heroism, Battle
-  Rez) are best-guess placeholders, since these aren't vanilla-original abilities and this server
-  has its own class changes — expect corrections as this gets tested further.
+- Several cooldown durations are vanilla-era estimates rather than confirmed values for abilities
+  this server changed or added outright (Battle Rez, Ascendance's mana/cast-time details aside,
+  Tranquility) — expect corrections as more of these get confirmed in-game.
+- The talent-gate scan requires SuperWoW's Inspect range and one scan per person, so a row may
+  stay visible for a short while after someone joins even if they don't have the talent.
 
 ### Settings window
 A full AceConfig-based options dialog with the same dark theme used across this client's
-addons, split into General, RaidAssist, Healers, Tanks, and Cooldowns tabs (Healers is currently a
-placeholder for future options).
+addons, split into General, RaidAssist, Healers, Tanks, and Cooldowns tabs.
 
 <!-- Screenshot: settings window -->
 ![Settings](./screenshots/options.png)
@@ -128,20 +164,34 @@ placeholder for future options).
   troubleshooting.
 - **`/rbs tauntdebug`** — toggles verbose combat-log output for the taunt-warning feature, for
   troubleshooting.
-- **`/rbs cddebug`** — toggles verbose combat-log output for the cooldown tracker (beta), for
-  troubleshooting.
+- **`/rbs cddebug`** — toggles verbose output (combat log and, when SuperWoW is present,
+  `UNIT_CASTEVENT`) for the cooldown tracker, for troubleshooting.
 - **`/rbs cdstate`** — dumps the cooldown tracker's current internal state (enabled? window shown?
   what's actively tracked right now) straight to chat.
 - **`/rbs cdtest`** — injects a fake 30-second cooldown so the cooldown window's position/rendering
   can be checked without waiting for a real cast.
+- **`/rbs overload`** — toggles 25 synthetic cooldown rows, for testing the row-limit/column-wrap
+  layout without needing a real 25-person raid on cooldown.
 - **`/rbs ssdebug`** — toggles verbose tooltip output for Soulstone caster detection, for
   troubleshooting.
-- Drag the title bar to move the window; drag the bottom-left grip to resize it.
+- **`/rbs auradump <name>`** — dumps every aura a given raid/party member (or your current
+  target) has, straight to chat, for troubleshooting buff detection.
+- **`/rbs talentdump <name>`** — inspects a given raid/party member and dumps every talent they
+  have at least one point in, straight to chat.
+- Drag the title bar to move the main window; drag the bottom-left grip to resize it. The
+  Cooldowns window is dragged the same way, from anywhere on it.
 
 ## Dependencies
 
-- **ClassicAPI — required.** Buff detection is built on `C_UnitAuras.GetAuraDataByIndex`, which
-  ClassicAPI provides; without it, this addon cannot scan buffs at all.
+- **ClassicAPI — required.** Buff detection is built entirely on `C_UnitAuras.GetAuraDataByIndex`,
+  which ClassicAPI provides; without it, this addon cannot scan buffs at all.
+- **SuperWoW — required.** Its `UNIT_CASTEVENT` event is the only reliable way on this client to
+  detect *another* player's completed cast (Kick, Challenging Shout, Innervate, Soulstone, etc.)
+  — without it, Cooldowns-tracker detection for anyone but possibly yourself falls back to a
+  combat-log path confirmed unreliable on this client.
+- **Nampower — optional.** Improves mouseover casting (an atomic, queue-safe cast instead of a
+  manual target-swap sequence) and Cooldowns-tracker icon resolution (a live spell-texture/name
+  lookup instead of only a bundled table or a hardcoded guess). Nothing breaks without it.
 - **Ace3 (AceGUI-3.0 + AceConfig-3.0) is bundled in `Libs\`** — nothing else to install for the
   settings window to work.
 
