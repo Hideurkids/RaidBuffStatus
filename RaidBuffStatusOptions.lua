@@ -441,6 +441,14 @@ local function CreateCooldownsTab()
 				RaidBuffStatusConfig.CDRowLimit = value
 			end,
 		},
+		resetPosition = {
+			type = "execute", order = 2.8, width = "full",
+			name = "Reset position",
+			desc = "Puts the Cooldowns window back at its default position (center of the screen, slightly above center) -- for if it's been dragged off-screen or somewhere inconvenient.",
+			func = function()
+				RBS_ResetCDPosition()
+			end,
+		},
 		talentHeader = {
 			type = "header", order = 3,
 			name = "Experimental",

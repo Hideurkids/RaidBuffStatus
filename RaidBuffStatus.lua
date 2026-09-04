@@ -66,7 +66,7 @@ end
 -- actually running, without having to ask the user to check -- also flags whether a stale/second
 -- copy of this addon (e.g. a leftover install of the old reference folder reusing the same global
 -- names) might be clobbering these functions after this file loads.
-RBS_BUILD = "v68-soulstone-castevent-arcanebrilliance"
+RBS_BUILD = "v69-cd-reset-position"
 
 -- CONFIRMED via real raid testing (2026-08-31): right after a disconnect/reconnect (server kick,
 -- zone in, etc.), C_UnitAuras.GetAuraDataByIndex can return NOTHING for a window of several
@@ -2370,6 +2370,19 @@ local function RBS_CreateCDFrame()
 	f:SetScript("OnUpdate", RBS_CDFrameOnUpdate)
 
 	RBS_CDNeedsBuild = true
+end
+
+-- "Reset position" (2026-09-03, per the user, for the Options window's Cooldowns tab): the CD
+-- frame's position is never saved across reloads (RBS_CreateCDFrame always starts it at the same
+-- default point on load), so this only ever needs to undo a mid-session drag -- same default point
+-- as RBS_CreateCDFrame's own initial SetPoint, kept in sync manually since the position isn't stored
+-- anywhere to read back.
+function RBS_ResetCDPosition()
+	if not RaidBuffStatusCDFrame then
+		return
+	end
+	RaidBuffStatusCDFrame:ClearAllPoints()
+	RaidBuffStatusCDFrame:SetPoint("CENTER", UIParent, "CENTER", 0, 80)
 end
 
 -- Re-applies every RaidBuffStatusConfig default AND refreshes the RBS_ICON_SIZE global mirror
