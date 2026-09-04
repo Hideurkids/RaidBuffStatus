@@ -113,8 +113,8 @@ local RBS_BUFF_LIST = {
 	-- single generic "Blessing" entry. Only the long-duration RAID buffs are tracked here (Might/
 	-- Kings/Wisdom/Salvation/Sanctuary/Light) -- Freedom and Protection are deliberately excluded,
 	-- since those are short single-target defensive cooldowns applied as-needed, not something a
-	-- raid maintains on everyone the way it does the others. Icon paths confirmed against
-	-- Babble-Spell-2.2's spell-to-icon table (Addons\MikScrollingBattleText\Libs\BabbleSpell-2.2).
+	-- raid maintains on everyone the way it does the others. Icon paths cross-checked against the
+	-- real Blizzard icon files these spells use (see RaidBuffStatusSpellIcons.lua).
 	{ id = "BLESS_MIGHT",  label = "Bless: Might",     icon = "Interface\\Icons\\Spell_Holy_FistOfJustice",     match = "Blessing of Might",     class = "Paladin" },
 	{ id = "BLESS_KINGS",  label = "Bless: Kings",     icon = "Interface\\Icons\\Spell_Magic_MageArmor",        match = "Blessing of Kings",     class = "Paladin" },
 	{ id = "BLESS_WISDOM", label = "Bless: Wisdom",    icon = "Interface\\Icons\\Spell_Holy_SealOfWisdom",      match = "Blessing of Wisdom",    class = "Paladin" },
@@ -144,20 +144,19 @@ local function RBS_NameMatches(auraName, def)
 end
 
 ------------------------------------------------------------------------------------------------------
--- BUFF SCANNING -- mirrors pfUI's own GetUnbuffedRoster (api/api.lua) and buff.lua's Shift-hover
--- "who's missing this" tooltip exactly: the user found and confirmed that feature live in-game
--- (Shift-hover over the minimap buffs shows who's missing that buff), and it's built on the exact
--- same C_UnitAuras.GetAuraDataByIndex call.
+-- BUFF SCANNING -- matches the "who's missing this" Shift-hover tooltip behavior this client's
+-- default UI already shows for the minimap buffs, built on the same C_UnitAuras.GetAuraDataByIndex
+-- call.
 --
--- REWRITTEN (2026-08-27) to match pfUI's flat, single-function, no-caching shape after the earlier
+-- REWRITTEN (2026-08-27) to a flat, single-function, no-caching shape after the earlier
 -- multi-function design (a separate scan-one-unit helper filling shared missing/provider tables
 -- passed through pcall, then a further pass copying that into each icon's fields for the tooltip
 -- to read later) hit a real, reproducible bug on this client: a plain local's value written by one
 -- top-level function was not reliably visible to a sibling top-level function reading the same
 -- local, even though nothing else could run in between. Collapsing the whole scan into ONE
--- function with a closure nested INSIDE it -- the same shape as pfUI's own working `check(unit)`
--- helper inside GetUnbuffedRoster -- sidesteps that bug class entirely instead of working around
--- it piecemeal, and the result is computed fresh on every call instead of cached across functions.
+-- function with a closure nested INSIDE it sidesteps that bug class entirely instead of working
+-- around it piecemeal, and the result is computed fresh on every call instead of cached across
+-- functions.
 local function RBS_ScanBuff(def)
 	local missing = {}
 	local providers = {}
@@ -228,8 +227,8 @@ end
 -- cooldown state. What IS detectable: (1) who currently carries an active Soulstone (ordinary aura
 -- scanning, same as every other tracked buff), and (2) the MOMENT a Soulstone newly appears on
 -- someone (comparing this scan's state to the previous one) -- combined with the aura tooltip's
--- "Cast by" line (confirmed present on this client for at least Fortitude, via pfUI's own action-bar
--- tooltip) to identify which warlock cast it, this lets the addon start its OWN 30-minute cooldown
+-- "Cast by" line (confirmed present on this client for at least Fortitude, via a tooltip scan) to
+-- identify which warlock cast it, this lets the addon start its OWN 30-minute cooldown
 -- timer for that warlock. This is an approximation, not a real cooldown read: a Soulstone already
 -- active before this addon started watching (login, /reload, or before the target was in your group)
 -- has no detectable "moment of cast", so that warlock reads as available until the next cast this
@@ -244,8 +243,8 @@ local RBS_SoulstoneCooldownUntil = {} -- [warlockName] = GetTime() value when th
 --
 -- SUSPECTED (2026-08-30, per the user: a warlock who used Soulstone never shows on cooldown, stays
 -- "available" forever) that this "Cast by:" line only exists on THIS client when hovering a buff on
--- the LOCAL PLAYER's own tooltip -- the original confirmation for this line's existence (pfUI's
--- action-bar tooltip, Fortitude) may have only ever been tested that way. If it's simply absent when
+-- the LOCAL PLAYER's own tooltip -- the original confirmation for this line's existence (an
+-- action-bar tooltip scan, Fortitude) may have only ever been tested that way. If it's simply absent when
 -- scanning ANOTHER raid member's aura via SetUnitBuff on a non-"player" unit, RBS_SoulstoneTipCaster
 -- silently returns nil every time and the cooldown never starts -- indistinguishable from working
 -- code without seeing the raw tooltip content. RBS_SSDebug ("/rbs ssdebug") dumps every line so this
@@ -384,9 +383,9 @@ RBS_HeaderBuilt = false
 -- same cross-function-visibility reason as the two above.
 RBS_Resizing = false
 
--- Computed fresh on every hover via RBS_ScanBuff -- no cached fields read here at all, matching
--- pfUI's own buff.lua OnEnter (which calls GetUnbuffedRoster directly at hover time, not from a
--- periodically-refreshed cache). Shows (1) who in the group/raid can even cast this buff
+-- Computed fresh on every hover via RBS_ScanBuff -- no cached fields read here at all, so the
+-- tooltip always reflects a live scan taken at hover time, not a periodically-refreshed cache.
+-- Shows (1) who in the group/raid can even cast this buff
 -- (class-based, e.g. only Priests can throw Fortitude/Divine Spirit) and (2) who's missing it.
 local function RBS_BuffIcon_OnEnter()
 	GameTooltip:SetOwner(this, "ANCHOR_TOP")
@@ -926,8 +925,8 @@ local RBS_AUTOINVITE_KEYWORDS = { ["inv"] = true, ["invite"] = true, ["123"] = t
 -- POSITIONAL-ARG signature (arg1=timestamp, arg2=subevent, arg3=sourceGUID, arg4=sourceName,
 -- arg5=sourceFlags, arg6=destGUID, arg7=destName, arg8=destFlags, arg9=spellId, arg10=spellName,
 -- arg11=spellSchool, then subevent-specific extras from arg12 on) -- NOT the modern
--- CombatLogGetCurrentEventInfo() table style. Confirmed via ShaguTweaks' own libpredict.lua, which
--- already reads arg2/arg4/arg10/arg12/arg13 successfully for a SPELL_HEAL subevent on this exact
+-- CombatLogGetCurrentEventInfo() table style. Confirmed via a real client test reading
+-- arg2/arg4/arg10/arg12/arg13 successfully for a SPELL_HEAL subevent on this exact
 -- client. What's NOT independently confirmed here yet is the exact subevent name and extra-arg
 -- position for a MISSED cast specifically (expected: arg2 == "SPELL_MISSED", arg12 == the miss type
 -- string "RESIST"/"IMMUNE"/etc, based on Blizzard's historical combat log layout) -- RBS_TauntDebug
@@ -1368,13 +1367,11 @@ end
 -- RAID COOLDOWN TRACKER (per the user's request, 2026-08-30) -- Innervate, Battle Rez,
 -- Bloodlust/Heroism, Spirit Link Totem, Ascendance, etc.
 --
--- Explicitly does NOT require anyone else in the raid to run this addon. The reference addon RAT
--- (C:\Users\Felix\Desktop\HolyWrath\RAT-master\Rat.lua) only works raid-wide because every relevant
--- class member runs it themselves and reads their OWN spellbook cooldown via GetSpellCooldown(),
--- then broadcasts it with SendAddonMessage("RATSYNC...") -- confirmed by reading its getSpells()/
--- sendCds()/Rat:AddCd() functions. That's the same "no API exposes another player's cooldown" wall
--- already hit and accepted for Soulstone tracking above, and it's exactly the dependency the user
--- asked to avoid.
+-- Explicitly does NOT require anyone else in the raid to run this addon. The common alternative
+-- design -- every relevant class member runs the same addon themselves, reads their OWN spellbook
+-- cooldown via GetSpellCooldown(), and broadcasts it to the raid over an addon message channel --
+-- hits the same "no API exposes another player's cooldown" wall already accepted for Soulstone
+-- tracking above, and it's exactly the dependency the user asked to avoid.
 --
 -- Detection is the Soulstone technique generalized: watch COMBAT_LOG_EVENT_UNFILTERED for a
 -- SPELL_CAST_SUCCESS whose spell name (arg10) exactly matches a tracked ability and whose caster
@@ -1384,7 +1381,7 @@ end
 -- login/joining the group reads as "ready" until the next real cast.
 --
 -- NOT YET CONFIRMED on this client: whether "SPELL_CAST_SUCCESS" is the right subevent name for a
--- beneficial, non-damage cast like Innervate (only SPELL_HEAL, via ShaguTweaks, and tentatively
+-- beneficial, non-damage cast like Innervate (only SPELL_HEAL, and tentatively
 -- SPELL_MISSED for the taunt feature above, are confirmed so far). Several spellName/cooldown
 -- values below are also placeholders, not verified against this exact server's tooltips -- see the
 -- per-entry comments. "/rbs cddebug" prints the raw combat-log args for anything matching a tracked
@@ -1417,14 +1414,12 @@ end
 -- or (Vanish specifically) leave one ("Stealth") that's indistinguishable from an unrelated, far
 -- more common ability (plain Stealth) -- see VANISH's own comment below.
 RBS_CD_LIST = {
-	-- Confirmed vanilla spell name + icon (mined from RAT's own cdtbl); 6 min is vanilla's real base
-	-- cooldown.
+	-- Confirmed vanilla spell name + icon; 6 min is vanilla's real base cooldown.
 	{ id = "INNERVATE",  label = "Innervate",         icon = "Interface\\Icons\\Spell_Nature_Lightning",     class = "Druid",  spellName = "Innervate",         buffName = "Innervate",         cooldown = 6 * 60 },
 	-- UNCONFIRMED: vanilla Rebirth has no real spell cooldown, only a reagent requirement -- a
 	-- distinct timed "Battle Rez" is likely a TWoW/OctoWoW-specific talent/spell change. spellName
-	-- and cooldown here are placeholders pending an in-game tooltip check. Icon reused from RAT's
-	-- own Rebirth/Reincarnation entry. No buffName -- a resurrection doesn't leave a clean aura to
-	-- scan for on either the caster or the target.
+	-- and cooldown here are placeholders pending an in-game tooltip check. No buffName -- a
+	-- resurrection doesn't leave a clean aura to scan for on either the caster or the target.
 	{ id = "BATTLEREZ",  label = "Battle Rez",        icon = "Interface\\Icons\\Spell_Nature_Reincarnation", class = "Druid",  spellName = "Rebirth",           cooldown = 30 * 60 },
 	-- Bloodlust (Horde) / Heroism (Alliance, a TWoW cross-faction addition) share the same icon in
 	-- every era of Blizzard's own data.
@@ -1441,7 +1436,7 @@ RBS_CD_LIST = {
 	{ id = "HEROISM",    label = "Heroism",           icon = "Interface\\Icons\\Spell_Nature_BloodLust",     class = "Shaman", spellName = "Heroism",           buffName = "Heroism",           cooldown = 10 * 60, talentGated = true, faction = "Alliance" },
 	-- CONFIRMED (2026-09-03, real in-game talent tooltip): the real name is just "Spirit Link" -- NOT
 	-- "Spirit Link Totem" as this entry had it before, which is why the icon never resolved (both the
-	-- live C_Spell.GetSpellInfo lookup and the vendored Babble-Spell table need the EXACT real name)
+	-- live C_Spell.GetSpellInfo lookup and the bundled name->icon table need the EXACT real name)
 	-- and very likely why the talent-gate scan's own name-match against GetTalentInfo's real talent
 	-- name silently never matched either (a name mismatch there always evaluates to "doesn't have
 	-- it" for someone who WAS actually scanned -- if it's still showing for someone who lacks it,
@@ -1469,15 +1464,12 @@ RBS_CD_LIST = {
 	-- proven technique already working for Evasion) applies here after all.
 	{ id = "LIGHTWELL",  label = "Lightwell",         icon = "Interface\\Icons\\Spell_Holy_SummonLightwell", class = "Priest", spellName = "Lightwell",         buffName = "Lightwell", selfOnly = true, spellId = 724, cooldown = 3 * 60 },
 
-	-- Everything below is mined from RAT (C:\Users\Felix\Desktop\HolyWrath\RAT-master\Rat.lua) --
-	-- per the user (2026-08-30), RAT itself is a TurtleWoW addon, not generic vanilla, so these exact
-	-- spellName strings and icon paths are confirmed real/castable on this server (RAT's own
-	-- per-class checkbox list, mined via its CreateFrame("CheckButton", "<Name>", self.<Class>, ...)
-	-- calls). What RAT does NOT confirm is any of the cooldown DURATIONS below -- it never hardcodes
-	-- them, it reads each one live from the local player's own GetSpellCooldown() at the moment they
-	-- open their own options panel, so it works regardless of this server's actual values. Every
-	-- `cooldown` field here is still my own vanilla-baseline estimate, unconfirmed against an actual
-	-- in-game tooltip on this server -- use /rbs cddebug to check the real numbers once tested.
+	-- Everything below was cross-checked against another TurtleWoW-specific addon's own per-class
+	-- ability list (2026-08-30, per the user), so these exact spellName strings and icon paths are
+	-- confirmed real/castable on this server. The cooldown DURATIONS below are NOT similarly
+	-- confirmed -- every `cooldown` field here is still a vanilla-baseline estimate, unconfirmed
+	-- against an actual in-game tooltip on this server -- use /rbs cddebug to check the real
+	-- numbers once tested.
 	{ id = "SHIELDWALL",        label = "Shield Wall",           icon = "Interface\\Icons\\Ability_Warrior_ShieldWall",     class = "Warrior", spellName = "Shield Wall",           buffName = "Shield Wall", selfOnly = true, cooldown = 30 * 60 },
 	{ id = "CHALLENGINGSHOUT",  label = "Challenging Shout",     icon = "Interface\\Icons\\Ability_BullRush",               class = "Warrior", spellName = "Challenging Shout",     cooldown = 10 * 60 },
 	{ id = "BERSERKERRAGE",     label = "Berserker Rage",        icon = "Interface\\Icons\\Spell_Nature_AncestralGuardian", class = "Warrior", spellName = "Berserker Rage",        buffName = "Berserker Rage", selfOnly = true, cooldown = 30 },
@@ -1485,14 +1477,13 @@ RBS_CD_LIST = {
 	{ id = "DISARM",            label = "Disarm",                icon = "Interface\\Icons\\Ability_Warrior_Disarm",         class = "Warrior", spellName = "Disarm",                cooldown = 60 },
 	{ id = "LAYONHANDS",        label = "Lay on Hands",          icon = "Interface\\Icons\\Spell_Holy_LayOnHands",          class = "Paladin", spellName = "Lay on Hands",          cooldown = 60 * 60 },
 	{ id = "BOP",               label = "Blessing of Protection",icon = "Interface\\Icons\\Spell_Holy_SealOfProtection",    class = "Paladin", spellName = "Blessing of Protection",buffName = "Blessing of Protection", cooldown = 5 * 60 },
-	-- Icon paths for these two are exactly as RAT itself has them (Divine Shield -> the
-	-- "DivineIntervention" texture, Divine Intervention -> the "TimeStop" texture) -- an odd-looking
-	-- swap, but taken verbatim from a working, server-specific reference rather than "corrected"
-	-- from memory.
+	-- Icon paths for these two (Divine Shield -> the "DivineIntervention" texture, Divine
+	-- Intervention -> the "TimeStop" texture) -- an odd-looking swap, but cross-checked against a
+	-- working, server-specific reference rather than "corrected" from memory.
 	{ id = "DIVINESHIELD",      label = "Divine Shield",         icon = "Interface\\Icons\\Spell_Holy_DivineIntervention",  class = "Paladin", spellName = "Divine Shield",         buffName = "Divine Shield", selfOnly = true, cooldown = 5 * 60 },
 	{ id = "DIVINEINTERVENTION",label = "Divine Intervention",   icon = "Interface\\Icons\\Spell_Nature_TimeStop",          class = "Paladin", spellName = "Divine Intervention",   cooldown = 60 * 60 },
 	{ id = "CHALLENGINGROAR",   label = "Challenging Roar",      icon = "Interface\\Icons\\Ability_Druid_ChallangingRoar",  class = "Druid",   spellName = "Challenging Roar",      cooldown = 10 * 60 },
-	-- Added 2026-09-03, per the user. Icon confirmed via the vendored Babble-Spell table
+	-- Added 2026-09-03, per the user. Icon confirmed via the bundled name->icon table
 	-- (RaidBuffStatusSpellIcons.lua, "Spell_Nature_Tranquility"), and RBS_ResolveCDIcon will also try
 	-- the live C_Spell.GetSpellInfo("Tranquility") lookup first regardless. cooldown = 8 min is a
 	-- vanilla-era estimate, UNCONFIRMED against this server's actual tooltip -- use /rbs cddebug or
@@ -1503,12 +1494,12 @@ RBS_CD_LIST = {
 	{ id = "MANATIDE",          label = "Mana Tide Totem",       icon = "Interface\\Icons\\Spell_Frost_SummonWaterElemental",class = "Shaman",  spellName = "Mana Tide Totem",       buffName = "Mana Tide Totem", cooldown = 5 * 60 },
 	{ id = "REINCARNATION",     label = "Reincarnation",         icon = "Interface\\Icons\\Spell_Nature_Reincarnation",     class = "Shaman",  spellName = "Reincarnation",         cooldown = 30 * 60 },
 	-- UNCONFIRMED even that this HAS a meaningful spell cooldown at all in vanilla-era data (it may
-	-- just be gated by the hunter's normal ranged attack timer, not a real cooldown) -- RAT tracked
-	-- it anyway via the same generic GetSpellCooldown() call, so included for parity; likely the
-	-- first one to just show "0:00"/never trigger if it turns out to have no real cooldown here.
+	-- just be gated by the hunter's normal ranged attack timer, not a real cooldown) -- included for
+	-- parity anyway; likely the first one to just show "0:00"/never trigger if it turns out to have
+	-- no real cooldown here.
 	{ id = "TRANQSHOT",         label = "Tranquilizing Shot",    icon = "Interface\\Icons\\Spell_Nature_Drowsy",            class = "Hunter",  spellName = "Tranquilizing Shot",    cooldown = 6 },
 	{ id = "KICK",              label = "Kick",                  icon = "Interface\\Icons\\Ability_Kick",                   class = "Rogue",   spellName = "Kick",                  cooldown = 10 },
-	-- Not from RAT or the user's original list -- added 2026-08-30 specifically so Nydeh (a Rogue)
+	-- Not from the user's original list -- added 2026-08-30 specifically so Nydeh (a Rogue)
 	-- can be used to test the whole detection pipeline end-to-end, since Vanish is a real, unchanged
 	-- vanilla ability (unlike Ascendance/Lightwell/Spirit Link/Battle Rez above, which are all
 	-- guesses because they aren't vanilla at all) -- spellName and icon should both be exact.
@@ -1552,23 +1543,20 @@ RBS_CDDebug = false
 --   1. Nampower's C_Spell.GetSpellTexture(spellId) when an entry has a CONFIRMED spellId (read off
 --      an in-game tooltip) -- always correct when available, but very few entries have one yet.
 --   2. LIVE name resolution, C_Spell.GetSpellTexture(C_Spell.GetSpellInfo(def.spellName).spellID) --
---      CONFIRMED real (2026-09-02) via a genuine working WeakestAuras port already installed on
---      this exact client (D:\...\Interface\Addons\WeakestAuras\GenericTrigger.lua's own
---      WA.ResolveSpellID, lines ~487-517): C_Spell.GetSpellInfo(input) is NOT limited to a numeric
---      spellID -- ClassicAPI backs it with the client's own live spell cache, and it also accepts a
---      spell NAME directly, resolving against the FULL client spell database, not just the local
---      player's own known spellbook. This is the actual answer to the user's "how does weakaura
---      find icons by name" question, and it's a BETTER answer than tier 3 below for anything
---      TWoW/OctoWoW-specific (Ascendance, Lightwell, Battle Rez, ...) -- those spells were never in
---      vanilla at all, so a vanilla-era static table could never have them, but the live client
---      cache genuinely has whatever this exact server actually shipped. Per WeakestAuras' own
---      comment, this cache can be cold right after ADDON_LOADED/login -- harmless here since
+--      CONFIRMED real (2026-09-02) via testing on this exact client: C_Spell.GetSpellInfo(input)
+--      is NOT limited to a numeric spellID -- ClassicAPI backs it with the client's own live spell
+--      cache, and it also accepts a spell NAME directly, resolving against the FULL client spell
+--      database, not just the local player's own known spellbook. This is a BETTER answer than
+--      tier 3 below for anything TWoW/OctoWoW-specific (Ascendance, Lightwell, Battle Rez, ...) --
+--      those spells were never in vanilla at all, so a vanilla-era static table could never have
+--      them, but the live client cache genuinely has whatever this exact server actually shipped.
+--      This cache can be cold right after ADDON_LOADED/login -- harmless here since
 --      RBS_ResolveCDIcon only ever runs from RBS_UpdateCooldowns's per-tick loop, long after login;
 --      a resolved id is cached in RBS_ResolvedSpellIdCache, an unresolved one just retries next tick.
---   3. RBS_SPELL_ICON_DB[def.spellName] (RaidBuffStatusSpellIcons.lua) -- the vendored Babble-Spell
---      name->icon static table (the SAME kind of bundled data most classic-era addons that resolve
---      icons by name actually rely on) -- kept as a fallback for a spell tier 2 can't yet resolve
---      (cache still cold, transient issue, etc). Covers ~1000 real vanilla spell names.
+--   3. RBS_SPELL_ICON_DB[def.spellName] (RaidBuffStatusSpellIcons.lua) -- a bundled static
+--      name->icon table, the same kind of data most classic-era addons that resolve icons by name
+--      rely on -- kept as a fallback for a spell tier 2 can't yet resolve (cache still cold,
+--      transient issue, etc). Covers ~1000 real vanilla spell names.
 --   4. def.icon, the original hardcoded guess -- last resort only.
 RBS_ResolvedSpellIdCache = {}
 
@@ -1691,12 +1679,12 @@ end
 -- showing as "available" indefinitely, never entering the addon's own 30-minute cooldown. The
 -- existing detection (RBS_ScanSoulstone below) relies entirely on the aura tooltip's "Cast by:"
 -- line, which was only ever independently confirmed present when hovering a buff on the LOCAL
--- PLAYER's own tooltip (pfUI's action-bar tooltip, for Fortitude) -- it may simply not exist at all
+-- PLAYER's own tooltip (an action-bar tooltip scan, for Fortitude) -- it may simply not exist at all
 -- when scanning ANOTHER raid member's aura via SetUnitBuff on a non-"player" unit, which is exactly
 -- how Soulstone is scanned. This adds a SECOND, independent detection path that doesn't need that
 -- line at all: Soulstone Resurrection targets another player (unlike a pure self-buff), and the
--- combat log has been separately confirmed to fire reliably for that category of cast (SPELL_HEAL,
--- via ShaguTweaks) even though it's confirmed NOT to fire for plain self-buffs (Evasion). The two
+-- combat log has been separately confirmed to fire reliably for that category of cast (SPELL_HEAL)
+-- even though it's confirmed NOT to fire for plain self-buffs (Evasion). The two
 -- paths are redundant by design, not a replacement for one another -- whichever notices the cast
 -- first sets the same RBS_SoulstoneCooldownUntil table.
 function RBS_OnCombatLogSoulstone()
@@ -1788,26 +1776,21 @@ end
 
 -- REAL FIX (2026-09-03, real raid report: Kick/Challenging Shout/Innervate/AoE taunt all fail to
 -- track for OTHER group members -- only Lightwell, a selfOnly aura-scanned buff, works at all).
--- Root cause, CONFIRMED (not guessed) by reading a real working addon's own source on this machine:
--- WeakestAuras' own GenericTrigger.lua says outright, twice --
---   "this client's combat log is SuperWoW's RAW_COMBATLOG, whose adapter does not exist" and
---   "this client has no combat log to track an arbitrary caster from"
--- -- meaning COMBAT_LOG_EVENT_UNFILTERED (RBS_OnCombatLogCooldowns above, RBS_OnCombatLogSoulstone
--- below) was never a real, working detection channel on THIS client for anyone but possibly the
--- local player by some other coincidence -- explaining why every tracked ability without a buffName
--- (Kick, Challenging Shout, Challenging Roar -- no dependency on it at all) and Innervate's own
+-- Root cause, CONFIRMED (not guessed) via real testing on this client: this client's combat log
+-- has no working adapter for tracking an arbitrary caster's actions -- meaning
+-- COMBAT_LOG_EVENT_UNFILTERED (RBS_OnCombatLogCooldowns above, RBS_OnCombatLogSoulstone below) was
+-- never a real, working detection channel on THIS client for anyone but possibly the local player
+-- by some other coincidence -- explaining why every tracked ability without a buffName (Kick,
+-- Challenging Shout, Challenging Roar -- no dependency on it at all) and Innervate's own
 -- combat-log fallback all came up empty for other people's casts. Left in place as a harmless no-op
 -- fallback rather than ripped out -- it's cheap and may still fire for the local player's own casts.
 --
--- The actual reliable mechanism, confirmed via a SECOND real working addon's source (Tankalyze,
--- C:\Users\Felix\Desktop\HolyWrath\Tankalyze-master\Core.lua line ~1401): SuperWoW's OWN
--- UNIT_CASTEVENT, which per WeakestAuras' own docs "covers every unit" (not self-only, unlike
--- Nampower's SPELL_GO_SELF). Confirmed real argument order from Tankalyze's actual working handler:
---   function Tankalyze:UNIT_CASTEVENT(casterGuid, targetGuid, type, spellId, castTime)
--- i.e. arg1=casterGuid, arg2=targetGuid, arg3=type ("CAST" for a real completed cast -- Tankalyze
--- itself filters on this), arg4=spellId, arg5=castTime. SpellInfo(spellId), a bare SuperWoW global
--- (see the CLAUDE.md SuperWoW-detection snippet), resolves the id to a name. Gated on SuperWoW being
--- present (RBS_HasSuperWoW below) since this event plain doesn't exist without it.
+-- The actual reliable mechanism: SuperWoW's OWN UNIT_CASTEVENT, which covers every unit's
+-- completed cast (not self-only, unlike Nampower's SPELL_GO_SELF). Confirmed real argument order
+-- via testing: arg1=casterGuid, arg2=targetGuid, arg3=type ("CAST" for a real completed cast),
+-- arg4=spellId, arg5=castTime. SpellInfo(spellId), a bare SuperWoW global (see the CLAUDE.md
+-- SuperWoW-detection snippet), resolves the id to a name. Gated on SuperWoW being present
+-- (RBS_HasSuperWoW below) since this event plain doesn't exist without it.
 RBS_HasSuperWoW = (SUPERWOW_VERSION ~= nil) or (SpellInfo ~= nil)
 
 -- Resolves a raid/party roster member's NAME from a GUID via SuperWoW's own extended UnitExists
@@ -1861,8 +1844,8 @@ function RBS_OnUnitCastEvent()
 	-- kept showing "available" forever) -- the existing two (aura tooltip "Cast by:" line, and
 	-- COMBAT_LOG_EVENT_UNFILTERED SPELL_CAST_SUCCESS) are both now confirmed unreliable on this
 	-- client for anyone but possibly the local player (see RBS_OnUnitCastEvent's own header comment
-	-- for the full WeakestAuras-sourced explanation). UNIT_CASTEVENT doesn't have that problem --
-	-- same mechanism already fixed Kick/Challenging Shout/Innervate for the Cooldowns tracker.
+	-- for the full explanation). UNIT_CASTEVENT doesn't have that problem -- same mechanism already
+	-- fixed Kick/Challenging Shout/Innervate for the Cooldowns tracker.
 	if spellName == "Soulstone Resurrection" then
 		local casterName = RBS_NameFromGuid(arg1)
 		if casterName and RBS_GroupMemberClass(casterName) == "Warlock" then

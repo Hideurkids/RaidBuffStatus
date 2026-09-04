@@ -842,18 +842,16 @@ local function ActivateSlider(widget, event, _, value)
 		return v
 	end
 
-	-- Questie-Octo: availability filters are expensive semantic changes.  For
-	-- the compact low-level range control, let the handle move freely but only
-	-- commit once when the player releases it.  Committing every intermediate
-	-- 5-level stop started multiple availability/node/map rebuilds while a drag
-	-- was still in progress, which made quest icons visibly flash between states.
-	local commitOnMouseUp = option.arg and option.arg.questieCommitOnMouseUp
+	-- An option can opt a slider into committing only once, on release, instead of on every
+	-- intermediate value change -- useful when each intermediate value would otherwise trigger an
+	-- expensive rebuild while a drag is still in progress.
+	local commitOnMouseUp = option.arg and option.arg.commitOnMouseUp
 	if commitOnMouseUp then
 		local current = NormalizeSliderValue((widget.GetValue and widget:GetValue()) or value)
 		if event == "OnValueChanged" then
-			local prefix = option.arg and option.arg.questieLiveLabelPrefix
+			local prefix = option.arg and option.arg.liveLabelPrefix
 			if prefix and widget.SetLabel then
-				local maxLabel = option.arg.questieMaxLabel
+				local maxLabel = option.arg.maxLabel
 				if max and current >= max and maxLabel then
 					widget:SetLabel(prefix..tostring(maxLabel))
 				else
@@ -869,8 +867,8 @@ local function ActivateSlider(widget, event, _, value)
 	end
 
 	-- Ace3v / Vanilla compatibility:
-	-- Questie's normal sliders commit continuously through OnValueChanged and
-	-- use OnMouseUp only to refresh AceConfigDialog.  On Turtle's 1.12 slider
+	-- A normal (non-commitOnMouseUp) slider commits continuously through OnValueChanged and
+	-- uses OnMouseUp only to refresh AceConfigDialog.  On Turtle's 1.12 slider
 	-- implementation the release callback can carry the widget's pre-drag value,
 	-- so do not write the setting a second time on release.
 	if event == "OnMouseUp" then
@@ -1205,10 +1203,10 @@ local function FeedOptions(appName, options,container,rootframe,path,group,inlin
 					control = gui:Create("Slider")
 					control:SetLabel(name)
 					control:SetSliderValues(v.softMin or v.min or 0, v.softMax or v.max or 100, v.bigStep or v.step or 0)
-					-- Questie-Octo: discrete sliders can opt out of AceGUI's editable numeric box.
+					-- An option can opt a discrete slider out of AceGUI's editable numeric box.
 					-- Always restore it for normal sliders because AceGUI widgets may be reused.
 					if control.editbox then
-						if v.arg and v.arg.questieHideEditBox then control.editbox:Hide() else control.editbox:Show() end
+						if v.arg and v.arg.hideEditBox then control.editbox:Hide() else control.editbox:Show() end
 					end
 					control:SetIsPercent(v.isPercent)
 					local value = GetOptionsMemberValue("get",v, options, path, appName)
@@ -1216,12 +1214,12 @@ local function FeedOptions(appName, options,container,rootframe,path,group,inlin
 						value = 0
 					end
 					control:SetValue(value)
-					-- Do not rely on Questie-Octo's extended Slider widget being the active
-					-- AceGUI registration: another addon may have registered a newer Slider
-					-- first.  Every Ace slider exposes hightext, so set the endpoint label
-					-- directly when this option asks for a textual maximum such as "All".
-					if v.arg and v.arg.questieMaxLabel and control.hightext then
-						control.hightext:SetText(v.arg.questieMaxLabel)
+					-- Do not rely on any extended Slider widget's own registration being the active
+					-- AceGUI one: another addon may have registered a different Slider first.
+					-- Every Ace slider exposes hightext, so set the endpoint label directly when
+					-- this option asks for a textual maximum such as "All".
+					if v.arg and v.arg.maxLabel and control.hightext then
+						control.hightext:SetText(v.arg.maxLabel)
 					end
 					control:SetCallback("OnValueChanged",ActivateSlider)
 					control:SetCallback("OnMouseUp",ActivateSlider)
@@ -1665,57 +1663,6 @@ function AceConfigDialog:FeedGroup(appName,options,container,rootframe,path, isR
 
 			local tab = gui:Create("TabGroup")
 
-			-- Questie-Octo: the standalone Questie Options window uses five
-			-- top-level tabs. Keep AceConfig/AceGUI's normal tab behavior and
-			-- typography, but make those five buttons share the full row equally.
-			-- This is intentionally scoped to this app so other addons using the
-			-- same AceGUI library retain stock Ace3 tab sizing. Wrapping BuildTabs
-			-- also survives AceConfig refreshes and delayed OnWidthSet rebuilds.
-			if appName == "Questie Options" and tab.BuildTabs then
-				local questieOriginalBuildTabs = tab.BuildTabs
-				tab.BuildTabs = function(self)
-					local width = self.frame.width or self.frame:GetWidth() or 0
-
-					-- Our equal-width pass changes each button's real width. Stock AceGUI
-					-- reads that real width on the next BuildTabs() call to decide how many
-					-- rows are required. If we leave the stretched widths in place, the
-					-- five-tab row appears too wide and AceGUI wraps it. Restore the stock
-					-- text-sized geometry before AceGUI performs its row calculation.
-					if PanelTemplates_TabResize and self.tabs and width > 0 then
-						for _, button in pairs(self.tabs) do
-							if button and button:IsShown() then
-								PanelTemplates_TabResize(0, button, nil, width)
-							end
-						end
-					end
-
-					questieOriginalBuildTabs(self)
-
-					local tablist = self.tablist
-					if not tablist then return end
-					local count = tgetn(tablist)
-					if count < 1 then return end
-
-					width = self.frame.width or self.frame:GetWidth() or 0
-					if width <= 0 then return end
-
-					-- Stock TabGroup anchors every tab after the first 10 px into the
-					-- previous tab. Include those overlaps so five equal visible buttons
-					-- consume exactly one full row from left edge to right edge.
-					local equalWidth = (width + ((count - 1) * 10)) / count
-					for i = 1, count do
-						local button = self.tabs[i]
-						if button and button:IsShown() then
-							if PanelTemplates_TabResize then
-								PanelTemplates_TabResize(0, button, equalWidth, equalWidth)
-							else
-								button:SetWidth(equalWidth)
-							end
-						end
-					end
-				end
-			end
-
 			InjectInfo(tab, options, group, path, rootframe, appName)
 			tab:SetCallback("OnGroupSelected", GroupSelected)
 			tab:SetCallback("OnTabEnter", TreeOnButtonEnter)
@@ -1988,8 +1935,8 @@ function AceConfigDialog:Open(appName, container, a1,a2,a3,a4,a5,a6,a7,a8,a9,a10
 		f:Show()
 	end
 
-	-- ShaguTweaks-style dark pass (adapted from Questie-Octo's hook here). AceConfigDialog recreates
-	-- child widgets on tab/options refresh, so reapply the theme after each feed. Generalized
+	-- Flat dark-theme reskin pass. AceConfigDialog recreates child widgets on tab/options refresh,
+	-- so reapply the theme after each feed. Generalized
 	-- (2026-08-27, for RaidBuffStatus) from a hardcoded `appName == "Holyward"` check to a naming
 	-- convention -- `<AppName>_ApplyOptionsDarkTheme` -- so this SAME vendored copy (this file is
 	-- RaidBuffStatus's own separate instance, registered under its own LibStub major, not shared

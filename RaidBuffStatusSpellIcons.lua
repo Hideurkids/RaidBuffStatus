@@ -1,19 +1,10 @@
 ------------------------------------------------------------------------------------------------------
--- RaidBuffStatus spell-name -> icon-texture lookup (2026-09-02, per the user's own question: "como
--- puede ser que el weakaura pueda encontrar iconos/skills/auras por nombre pero nosotros no").
---
--- The answer: there is no live WoW API on this client that maps a spell NAME to its icon texture --
--- WeakAuras/MSBT/etc. don't query one either, they ship a bundled, pre-mined static lookup TABLE
--- (originally built by hand against the real Blizzard client data back in the vanilla era). This is
--- exactly that table -- vendored verbatim (just renamed from a local to this addon's own global, and
--- stripped of the surrounding Ace2/AceLocale wrapper this project doesn't use) from a real, working
--- copy already present on this machine:
---   C:\Users\Felix\Desktop\HolyWrath\Addons\MikScrollingBattleText\Libs\BabbleSpell-2.2\Babble-Spell-2.2.lua
--- ("Babble-Spell-2.2", author ckknight, part of the classic WowAce Babble-2.2 library family -- MSBT
--- itself only pulls this in as a dependency, it did not author the data). ~1000 entries, enUS spell
--- names -> the bare icon filename (no "Interface\Icons\" prefix, no extension) -- confirmed
--- consistent with this addon's own already-hardcoded guesses for Innervate/Lightwell/Mana Tide Totem
--- (all three already matched this table exactly before this file even existed).
+-- RaidBuffStatus spell-name -> icon-texture lookup (2026-09-02). There is no live WoW API on this
+-- client that maps a spell NAME to its icon texture, so this is a pre-compiled static lookup TABLE
+-- instead, built against the real Blizzard client data: ~1000 entries, enUS spell names -> the bare
+-- icon filename (no "Interface\Icons\" prefix, no extension) -- confirmed consistent with this
+-- addon's own already-hardcoded guesses for Innervate/Lightwell/Mana Tide Totem (all three already
+-- matched this table exactly before this file even existed).
 --
 -- RBS_ResolveCDIcon (RaidBuffStatus.lua) checks this AFTER a confirmed spellId (C_Spell.GetSpellTexture,
 -- always correct when available) and BEFORE the per-entry hardcoded icon guess in RBS_CD_LIST (which

@@ -1,5 +1,5 @@
---[[ Questie CallbackHandler-1.0 API, Lua 5.0 syntax compatibility ]]
--- Original Questie foundation: CallbackHandler-1.0 r1131 / MINOR 6.
+--[[ CallbackHandler-1.0 API, Lua 5.0 syntax compatibility ]]
+-- Based on upstream CallbackHandler-1.0 r1131 / MINOR 6.
 -- Turtle 1.12 Lua 5.0 supports vararg declarations but consumes them through
 -- the implicit 'arg' table rather than Lua 5.1's '...' expression.
 local MAJOR, MINOR = "RBS-CallbackHandler-1.0", 6
@@ -20,8 +20,8 @@ local function errorhandler(err)
   return geterrorhandler()(err)
 end
 
--- Same Questie dispatcher strategy, emitted with fixed named arguments so the
--- generated source contains no Lua 5.1 vararg expressions.
+-- Dispatcher strategy: emitted with fixed named arguments so the generated source contains no
+-- Lua 5.1 vararg expressions.
 local function CreateDispatcher(argCount)
   local args={}
   local oldargs={}
@@ -110,8 +110,8 @@ function CallbackHandler:New(target, RegisterName, UnregisterName, UnregisterAll
 
   -- Ace3v's Vanilla callback ABI uses an explicit argc slot:
   --   Fire(eventName, argc, a1, a2, ...)
-  -- Keep that contract here.  Questie-Octo namespaces this compatibility
-  -- handler so it cannot replace another addon's global CallbackHandler-1.0.
+  -- Keep that contract here.  This copy is namespaced under its own LibStub major (RBS-*, see
+  -- above) so it cannot replace another addon's global CallbackHandler-1.0.
   function registry:Fire(eventname, argc, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10)
     if not rawget(events,eventname) or not next(events[eventname]) then return end
 

@@ -106,6 +106,9 @@ else in your raid to run this addon. Each row is a permanent "who has this" entr
 "Ready" (green) or a red countdown, so the list stays static instead of icons popping in and out
 as cooldowns start and end.
 
+<!-- Screenshot: the Cooldowns window with a row limit set, wrapped into multiple columns -->
+![Cooldowns tracker](./screenshots/cooldowns.png)
+
 Currently tracks: Innervate, Battle Rez, Bloodlust, Heroism, Spirit Link, Ascendance, Lightwell,
 Tranquility, Shield Wall, Challenging Shout, Berserker Rage, Pummel, Disarm, Lay on Hands,
 Blessing of Protection, Divine Shield, Divine Intervention, Challenging Roar, Mana Tide Totem,

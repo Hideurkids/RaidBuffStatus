@@ -1,15 +1,15 @@
 ------------------------------------------------------------------------------------------------------
 -- RaidBuffStatus TurtleWoW
 --
--- Settings window, cloned from Questie-Octo's proven architecture (UI/Options.lua there): a
--- declarative AceConfig options table fed through AceConfigDialog into a standalone AceGUI Frame,
--- plus Questie's ShaguTweaks-style dark pass over the resulting widget tree. All libraries are
--- vendored in Libs/ from Questie-Octo's own copies (Ace3 license, Libs/Ace3-LICENSE.txt), with
--- their LibStub major names renamed QuestieOcto-* -> RBS-* so both addons can coexist.
+-- Settings window: a declarative AceConfig options table fed through AceConfigDialog into a
+-- standalone AceGUI Frame, plus a flat dark-theme pass over the resulting widget tree. Ace3 is
+-- vendored in Libs/ (Ace3 license, Libs/Ace3-LICENSE.txt), with its LibStub major names renamed to
+-- an RBS-* prefix so this addon's own copy can't collide with another addon's differently-vendored
+-- copy of the same libraries via the shared global LibStub registry.
 --
 -- Earlier attempts hand-built this window (XML chrome, then raw AceGUI TabGroup calls) and each
--- came out broken in a different way; this file deliberately deviates from Questie's Options.lua
--- as little as possible.
+-- came out broken in a different way; this file deliberately keeps as close to a stock AceConfig
+-- options window as this client allows.
 ------------------------------------------------------------------------------------------------------
 
 -- Unconditional load canary (2026-08-27): the game reported "attempt to call global
@@ -30,7 +30,7 @@ local RaidBuffStatusOptions = {
 }
 
 ------------------------------------------------------------------------------------------------------
--- DARK THEME (ported from Questie-Octo UI/Options.lua, always on -- no toggle)
+-- DARK THEME (always on -- no toggle)
 ------------------------------------------------------------------------------------------------------
 
 local SHELL_R, SHELL_G, SHELL_B, SHELL_A = 0.30, 0.30, 0.30, 0.90
@@ -161,7 +161,7 @@ local function RaiseScrollbar(frame)
 	end
 end
 
--- Dark panels come from coloring frame backdrops (ShaguTweaks-style) rather than painting a gray
+-- Dark panels come from coloring frame backdrops rather than painting a gray
 -- vertex wash over every child region -- backdrop-less controls (checkboxes, sliders, icons) keep
 -- their crisp native artwork.
 local function DarkenInnerContent(frame)
@@ -205,7 +205,7 @@ local function DarkenInnerContent(frame)
 end
 
 -- Global on purpose: the vendored AceConfigDialog re-invokes this after every widget refresh
--- (tab switches recreate all child widgets), mirroring Questie's own hook there.
+-- (tab switches recreate all child widgets), so the reskin has to reapply every time too.
 function RaidBuffStatus_ApplyOptionsDarkTheme()
 	local configFrame = RaidBuffStatusOptions.configFrame
 	if not configFrame or not configFrame.frame then
@@ -512,7 +512,7 @@ local function CreateOptionsTable()
 end
 
 ------------------------------------------------------------------------------------------------------
--- FRAME LIFECYCLE (mirrors Questie-Octo's O:Initialize/Show/Hide/Toggle)
+-- FRAME LIFECYCLE (Initialize/Show/Hide/Toggle)
 ------------------------------------------------------------------------------------------------------
 
 local function ClearSavedConfigPosition()
@@ -554,8 +554,8 @@ local function RaidBuffStatusOptions_Initialize()
 
 	-- AceConfigDialog calls SetStatusTable() on this custom root frame after every option
 	-- activation, and AceGUI Frame's SetStatusTable immediately re-runs frame geometry, which can
-	-- visibly jump the window on this 1.12 client (Questie hit and neutralized the same thing).
-	-- Keep the status table for Ace3 semantics but skip the geometry re-apply.
+	-- visibly jump the window on this 1.12 client. Keep the status table for Ace3 semantics but
+	-- skip the geometry re-apply.
 	if configFrame.SetStatusTable then
 		configFrame.SetStatusTable = function(self, status)
 			if status then
@@ -574,7 +574,7 @@ local function RaidBuffStatusOptions_Initialize()
 	RaidBuffStatusOptions.configFrame = configFrame
 
 	-- ESC closes the window: the AceGUI widget table exposes IsShown()/Hide(), which is all
-	-- UISpecialFrames needs on this client (same registration Questie uses).
+	-- UISpecialFrames needs on this client.
 	RaidBuffStatusConfigFrame = configFrame
 	local registered = false
 	for _, name in pairs(UISpecialFrames or {}) do
