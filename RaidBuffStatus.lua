@@ -66,7 +66,7 @@ end
 -- actually running, without having to ask the user to check -- also flags whether a stale/second
 -- copy of this addon (e.g. a leftover install of the old reference folder reusing the same global
 -- names) might be clobbering these functions after this file loads.
-RBS_BUILD = "v67-spiritlink-real-name"
+RBS_BUILD = "v68-soulstone-castevent-arcanebrilliance"
 
 -- CONFIRMED via real raid testing (2026-08-31): right after a disconnect/reconnect (server kick,
 -- zone in, etc.), C_UnitAuras.GetAuraDataByIndex can return NOTHING for a window of several
@@ -92,7 +92,12 @@ local RBS_SCAN_SUPPRESS_SECONDS = 8
 -- here) that can actually cast this buff -- used to show WHO in the group/raid is even capable of
 -- providing it, separate from who currently has it active.
 local RBS_BUFF_LIST = {
-	{ id = "AI",       label = "Intellect",         icon = "Interface\\Icons\\Spell_Holy_MagicalSentry",     match = "Intellect",       class = "Mage" },
+	-- FIXED (2026-09-03, real raid report: had Arcane Brilliance active, addon still said missing) --
+	-- "Arcane Brilliance" (the raid-wide upgrade) doesn't contain the substring "Intellect" AT ALL,
+	-- unlike "Arcane Intellect" (the single-target rank) -- a plain `match = "Intellect"` could only
+	-- ever catch the single-target version. Same fix shape as SPIRIT below (Divine Spirit vs. Prayer
+	-- of Spirit): an explicit `matches` list instead of one substring.
+	{ id = "AI",       label = "Intellect",         icon = "Interface\\Icons\\Spell_Holy_MagicalSentry",     matches = { "Intellect", "Arcane Brilliance" }, class = "Mage" },
 	{ id = "MOTW",     label = "Mark/Gift",         icon = "Interface\\Icons\\Spell_Nature_Regeneration",    match = "the Wild",        class = "Druid" },
 	{ id = "PWF",      label = "Fortitude",         icon = "Interface\\Icons\\Spell_Holy_WordFortitude",     match = "Fortitude",       class = "Priest" },
 	{ id = "SPIRIT",   label = "Divine Spirit",     icon = "Interface\\Icons\\Spell_Holy_DivineSpirit",      matches = { "Divine Spirit", "Prayer of Spirit" }, class = "Priest" },
@@ -1765,6 +1770,19 @@ function RBS_OnUnitCastEvent()
 		local dbgMsg = "CD castevent: caster=" .. tostring(arg1) .. " spellId=" .. tostring(arg4) .. " name=" .. tostring(spellName)
 		DEFAULT_CHAT_FRAME:AddMessage("|cFF00CCFFRaidBuffStatus:|r " .. dbgMsg)
 		RBS_LogDebug(dbgMsg)
+	end
+
+	-- THIRD Soulstone detection path (2026-09-03, real raid report: warlocks who threw a Soulstone
+	-- kept showing "available" forever) -- the existing two (aura tooltip "Cast by:" line, and
+	-- COMBAT_LOG_EVENT_UNFILTERED SPELL_CAST_SUCCESS) are both now confirmed unreliable on this
+	-- client for anyone but possibly the local player (see RBS_OnUnitCastEvent's own header comment
+	-- for the full WeakestAuras-sourced explanation). UNIT_CASTEVENT doesn't have that problem --
+	-- same mechanism already fixed Kick/Challenging Shout/Innervate for the Cooldowns tracker.
+	if spellName == "Soulstone Resurrection" then
+		local casterName = RBS_NameFromGuid(arg1)
+		if casterName and RBS_GroupMemberClass(casterName) == "Warlock" then
+			RBS_SoulstoneCooldownUntil[casterName] = GetTime() + RBS_SOULSTONE_COOLDOWN_SECONDS
+		end
 	end
 
 	local track = RaidBuffStatusConfig.CDTrack or {}
