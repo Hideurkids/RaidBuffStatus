@@ -66,7 +66,7 @@ end
 -- actually running, without having to ask the user to check -- also flags whether a stale/second
 -- copy of this addon (e.g. a leftover install of the old reference folder reusing the same global
 -- names) might be clobbering these functions after this file loads.
-RBS_BUILD = "v70-cd-row-drag-fix"
+RBS_BUILD = "v72-perf-cdbuffscan-combatlog-skip"
 
 -- CONFIRMED via real raid testing (2026-08-31): right after a disconnect/reconnect (server kick,
 -- zone in, etc.), C_UnitAuras.GetAuraDataByIndex can return NOTHING for a window of several
@@ -784,12 +784,83 @@ local function RBS_BuildHeader()
 	RBS_ReflowIcons()
 end
 
+-- PERFORMANCE (2026-09-04, per the user: pfDebug's profiler showed RaidBuffStatus as the single
+-- highest CPU/memory-consuming addon a tester had installed). Root cause: the periodic dashboard
+-- tick used to call RBS_ScanBuff(def) once PER buff definition (~13 of them), and EACH of those
+-- independently re-walks C_UnitAuras.GetAuraDataByIndex for EVERY raid/party member from scratch --
+-- an O(buffs * people * auras-per-person) pile of native API calls every single tick (a 25-person
+-- raid with ~15-20 buffs each was on the order of several thousand pcall'd native calls per tick).
+-- This walks each unit's aura list exactly ONCE, checking every tracked buff's match against that
+-- one pass, cutting the number of GetAuraDataByIndex calls roughly (tracked buff count)-fold. Only
+-- used here, by the periodic tick -- RBS_ScanBuff itself is untouched and still used everywhere
+-- else (tooltip hover, click-announce, whisper-providers), since those are one-off single-buff
+-- lookups triggered by user interaction, not every tick, so batching wouldn't help them. Same
+-- "nested closure inside ONE function, return the result" shape as RBS_ScanBuff's own header
+-- comment documents (a real, confirmed local-visibility bug on this client when two separate
+-- top-level functions try to share a written-to local instead).
+--
+-- Only returns COUNTS, not name lists -- the periodic tick only ever displays a number
+-- (btn.rbsCount:SetText), it never needs the individual missing/provider names the way an
+-- on-demand RBS_ScanBuff call does, so this also skips building any per-buff `missing`/`providers`
+-- array or calling UnitClass at all, saving those allocations too.
+local function RBS_ScanAllBuffCounts()
+	local counts = {}
+	for b = 1, table.getn(RBS_BUFF_LIST), 1 do
+		local def = RBS_BUFF_LIST[b]
+		if def.special ~= "soulstone" then
+			counts[def.id] = 0
+		end
+	end
+
+	local function checkUnit(unit)
+		if not UnitExists(unit) then
+			return
+		end
+		local matched = {}
+		local index = 1
+		while true do
+			local ok, aura = pcall(C_UnitAuras.GetAuraDataByIndex, unit, index, "HELPFUL")
+			if not ok or not aura then
+				break
+			end
+			if aura.name then
+				for b = 1, table.getn(RBS_BUFF_LIST), 1 do
+					local def = RBS_BUFF_LIST[b]
+					if def.special ~= "soulstone" and not matched[def.id] and RBS_NameMatches(aura.name, def) then
+						matched[def.id] = true
+					end
+				end
+			end
+			index = index + 1
+		end
+		for b = 1, table.getn(RBS_BUFF_LIST), 1 do
+			local def = RBS_BUFF_LIST[b]
+			if def.special ~= "soulstone" and not matched[def.id] then
+				counts[def.id] = counts[def.id] + 1
+			end
+		end
+	end
+
+	if GetNumRaidMembers() > 0 then
+		for i = 1, GetNumRaidMembers(), 1 do
+			checkUnit("raid" .. i)
+		end
+	else
+		checkUnit("player")
+		for i = 1, GetNumPartyMembers(), 1 do
+			checkUnit("party" .. i)
+		end
+	end
+
+	return counts
+end
+
 -- Renamed from RaidBuffStatus_OnLoad/OnUpdate/UpdateDashboard (2026-08-27) to the addon-specific
 -- RBS_ prefix as part of chasing the local-visibility bug described above.
 --
--- Just refreshes each icon's missing-count number via RBS_ScanBuff -- the tooltip (RBS_BuffIcon_OnEnter)
--- computes its own fresh answer independently on hover, so this loop doesn't need to hand anything
--- to it.
+-- Just refreshes each icon's missing-count number via RBS_ScanAllBuffCounts -- the tooltip
+-- (RBS_BuffIcon_OnEnter) computes its own fresh answer independently on hover, so this loop doesn't
+-- need to hand anything to it.
 function RBS_UpdateDashboard()
 	-- See RBS_ScanSuppressUntil's own comment (top of file) -- skip refreshing the missing-counts
 	-- entirely right after a reconnect rather than showing a false "everyone missing" reading; the
@@ -797,6 +868,11 @@ function RBS_UpdateDashboard()
 	if GetTime() < RBS_ScanSuppressUntil then
 		return
 	end
+
+	-- ONE combined roster/aura pass for every non-Soulstone buff (see RBS_ScanAllBuffCounts' own
+	-- comment) instead of one full pass per buff definition.
+	local counts = RBS_ScanAllBuffCounts()
+
 	for b = 1, table.getn(RBS_BUFF_LIST), 1 do
 		local btn = RBS_BuffIcons[b]
 		if btn then
@@ -819,8 +895,7 @@ function RBS_UpdateDashboard()
 					btn.rbsCount:SetTextColor(1, 0.3, 0.3)
 				end
 			else
-				local missing = RBS_ScanBuff(def)
-				local missingCount = table.getn(missing)
+				local missingCount = counts[def.id] or 0
 				-- Explicit tostring() (2026-08-26): the number wasn't appearing at all with a raw
 				-- number passed straight to SetText -- forcing a string conversion first fixed it.
 				btn.rbsCount:SetText(tostring(missingCount))
@@ -1656,6 +1731,16 @@ end
 -- runs later, at event time. Every other cross-section function in this file already sidesteps this
 -- the same way (RBS_OnEvent/RBS_OnLoad/RBS_OnUpdate/RBS_UpdateDashboard are all plain globals too).
 function RBS_OnCombatLogCooldowns()
+	-- PERFORMANCE (2026-09-04): this whole detection path is now CONFIRMED unreliable for anyone
+	-- but possibly the local player (see RBS_OnUnitCastEvent's own header comment) and kept only as
+	-- a fallback for a player who doesn't have SuperWoW installed -- for anyone who DOES (RBS_HasSuperWoW,
+	-- computed below), UNIT_CASTEVENT already covers the exact same local-player case reliably, making
+	-- every bit of work below pure waste on THIS specific combat log event, which fires very
+	-- frequently during real combat (every nearby damage/heal/etc event, not just casts). Skip it
+	-- entirely rather than let it run to no benefit on every single one of those.
+	if RBS_HasSuperWoW then
+		return
+	end
 	if not arg10 then
 		return
 	end
@@ -1832,6 +1917,15 @@ RBS_CDBuffHadIt = {}
 -- ability with a buffName, reacts to that buff newly appearing on a unit by starting a cooldown for
 -- whoever cast it -- immediately for `selfOnly` entries (the buffed unit IS the caster), otherwise
 -- via the aura tooltip's "Cast by" line.
+--
+-- PERFORMANCE (2026-09-04, per the user, same finding as RBS_ScanAllBuffCounts above -- this one is
+-- actually WORSE, since it runs on the CD tracker's 1-second tick instead of the dashboard's 2-
+-- second one): used to walk EVERY unit's entire aura list independently once PER tracked buffName
+-- ability (Innervate, Bloodlust, Heroism, Spirit Link, Lightwell, Mana Tide, Shield Wall, Divine
+-- Shield, Evasion, Vanish, ...) -- an O(abilities * people * auras-per-person) pile of native
+-- C_UnitAuras.GetAuraDataByIndex calls every second. Now walks each unit's aura list ONCE, checking
+-- every tracked buffName ability against that single pass. Exact same hasIt/transition/caster-
+-- resolution semantics as before, just computed from one shared walk instead of N independent ones.
 function RBS_ScanCDBuffs()
 	-- See RBS_ScanSuppressUntil's own comment (top of file) -- same reasoning as RBS_UpdateDashboard.
 	if GetTime() < RBS_ScanSuppressUntil then
@@ -1840,48 +1934,64 @@ function RBS_ScanCDBuffs()
 
 	local track = RaidBuffStatusConfig.CDTrack or {}
 
+	-- Computed once per call, not once per unit: which CD_LIST entries actually need scanning.
+	local trackedDefs = {}
+	local trackedCount = 0
+	for i = 1, table.getn(RBS_CD_LIST), 1 do
+		local def = RBS_CD_LIST[i]
+		if def.buffName and track[def.id] then
+			trackedCount = trackedCount + 1
+			trackedDefs[trackedCount] = def
+		end
+	end
+
 	local function checkUnit(unit)
-		if not UnitExists(unit) then
+		if not UnitExists(unit) or trackedCount == 0 then
 			return
 		end
 		local name = UnitName(unit) or unit
 
-		for i = 1, table.getn(RBS_CD_LIST), 1 do
-			local def = RBS_CD_LIST[i]
-			if def.buffName and track[def.id] then
-				local hasIt = false
-				local castByIndex = nil
-				local index = 1
-				while true do
-					local ok, aura = pcall(C_UnitAuras.GetAuraDataByIndex, unit, index, "HELPFUL")
-					if not ok or not aura then
-						break
-					end
-					if aura.name == def.buffName then
-						hasIt = true
-						castByIndex = index
-						break
-					end
-					index = index + 1
-				end
-
-				local stateKey = unit .. "|" .. def.id
-				if hasIt and RBS_CDBuffHadIt[stateKey] == false then
-					local caster = name
-					if not def.selfOnly then
-						local okCaster, tipCaster = pcall(RBS_CDTipCaster, unit, castByIndex)
-						if okCaster and tipCaster and tipCaster ~= "" then
-							caster = tipCaster
-						else
-							caster = nil
-						end
-					end
-					if caster then
-						RBS_SetCDReady(def.id .. "|" .. caster, def.cooldown)
-					end
-				end
-				RBS_CDBuffHadIt[stateKey] = hasIt
+		-- ONE aura-list walk for this unit, recording which tracked buffs matched (and at which
+		-- index, needed later for the "Cast by:" tooltip lookup on a non-selfOnly entry).
+		local foundIndex = {}
+		local index = 1
+		while true do
+			local ok, aura = pcall(C_UnitAuras.GetAuraDataByIndex, unit, index, "HELPFUL")
+			if not ok or not aura then
+				break
 			end
+			if aura.name then
+				for d = 1, trackedCount, 1 do
+					local def = trackedDefs[d]
+					if not foundIndex[def.id] and aura.name == def.buffName then
+						foundIndex[def.id] = index
+					end
+				end
+			end
+			index = index + 1
+		end
+
+		for d = 1, trackedCount, 1 do
+			local def = trackedDefs[d]
+			local castByIndex = foundIndex[def.id]
+			local hasIt = castByIndex ~= nil
+
+			local stateKey = unit .. "|" .. def.id
+			if hasIt and RBS_CDBuffHadIt[stateKey] == false then
+				local caster = name
+				if not def.selfOnly then
+					local okCaster, tipCaster = pcall(RBS_CDTipCaster, unit, castByIndex)
+					if okCaster and tipCaster and tipCaster ~= "" then
+						caster = tipCaster
+					else
+						caster = nil
+					end
+				end
+				if caster then
+					RBS_SetCDReady(def.id .. "|" .. caster, def.cooldown)
+				end
+			end
+			RBS_CDBuffHadIt[stateKey] = hasIt
 		end
 	end
 
@@ -2131,11 +2241,6 @@ local function RBS_RenderCDRow(activeRows, def, casterName, remaining, iconSize,
 		return
 	end
 
-	row.icon:SetTexture(RBS_ResolveCDIcon(def))
-	-- Name only (2026-08-31, per the user): the icon already identifies the ability, no need to
-	-- spell it out again in the label too.
-	row.text:SetText(casterName)
-
 	-- Stashed for RBS_CDRow_OnClick/OnEnter (2026-09-02, per the user's right-click announce +
 	-- tooltip request) -- the click/hover handlers fire long after this runs, so they can't close
 	-- over any of these locals directly.
@@ -2143,22 +2248,47 @@ local function RBS_RenderCDRow(activeRows, def, casterName, remaining, iconSize,
 	row.rbsCaster = casterName
 	row.rbsRemaining = remaining
 
-	if remaining > 0 then
-		-- Progress bar drains from full to empty over the cooldown -- MinMax is the full cooldown
-		-- length, Value is however much is still left.
-		row.bar:SetMinMaxValues(0, def.cooldown)
-		row.bar:SetValue(remaining)
-		row.bar:SetStatusBarColor(0.75, 0.1, 0.1, 1)
-		local mins = math.floor(remaining / 60)
-		local secs = math.floor(math.mod(remaining, 60))
-		row.timerText:SetTextColor(1, 0.3, 0.3)
-		row.timerText:SetText(string.format("%d:%02d", mins, secs))
-	else
-		row.bar:SetMinMaxValues(0, 1)
-		row.bar:SetValue(1)
-		row.bar:SetStatusBarColor(0.15, 0.65, 0.2, 1)
-		row.timerText:SetTextColor(0.4, 1, 0.4)
-		row.timerText:SetText("R")
+	-- PERFORMANCE (2026-09-04, per the user's high-CPU/memory report): skip re-applying icon/text/
+	-- bar/color when NOTHING about this row actually changed since last tick. A "Ready" row's
+	-- content is 100% static tick to tick (until it goes on cooldown or the caster changes), so in
+	-- a big raid with many such rows this avoids a large number of redundant SetTexture/SetText/
+	-- SetStatusBarColor calls every second for no visible difference. An actively-counting-down row
+	-- legitimately changes every tick (remainingInt ticks down), so this never skips those.
+	local remainingInt = math.floor(remaining)
+	local ready = remaining <= 0
+	local unchanged = row.rbsLastAbilityId == def.id
+		and row.rbsLastCasterName == casterName
+		and row.rbsLastReady == ready
+		and (ready or row.rbsLastRemainingInt == remainingInt)
+
+	if not unchanged then
+		row.icon:SetTexture(RBS_ResolveCDIcon(def))
+		-- Name only (2026-08-31, per the user): the icon already identifies the ability, no need to
+		-- spell it out again in the label too.
+		row.text:SetText(casterName)
+
+		if remaining > 0 then
+			-- Progress bar drains from full to empty over the cooldown -- MinMax is the full
+			-- cooldown length, Value is however much is still left.
+			row.bar:SetMinMaxValues(0, def.cooldown)
+			row.bar:SetValue(remaining)
+			row.bar:SetStatusBarColor(0.75, 0.1, 0.1, 1)
+			local mins = math.floor(remaining / 60)
+			local secs = math.floor(math.mod(remaining, 60))
+			row.timerText:SetTextColor(1, 0.3, 0.3)
+			row.timerText:SetText(string.format("%d:%02d", mins, secs))
+		else
+			row.bar:SetMinMaxValues(0, 1)
+			row.bar:SetValue(1)
+			row.bar:SetStatusBarColor(0.15, 0.65, 0.2, 1)
+			row.timerText:SetTextColor(0.4, 1, 0.4)
+			row.timerText:SetText("R")
+		end
+
+		row.rbsLastAbilityId = def.id
+		row.rbsLastCasterName = casterName
+		row.rbsLastReady = ready
+		row.rbsLastRemainingInt = remainingInt
 	end
 
 	-- Column wrapping (2026-09-03, per the user: a row limit, then wrap into a new column to the
