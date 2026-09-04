@@ -66,7 +66,7 @@ end
 -- actually running, without having to ask the user to check -- also flags whether a stale/second
 -- copy of this addon (e.g. a leftover install of the old reference folder reusing the same global
 -- names) might be clobbering these functions after this file loads.
-RBS_BUILD = "v69-cd-reset-position"
+RBS_BUILD = "v70-cd-row-drag-fix"
 
 -- CONFIRMED via real raid testing (2026-08-31): right after a disconnect/reconnect (server kick,
 -- zone in, etc.), C_UnitAuras.GetAuraDataByIndex can return NOTHING for a window of several
@@ -1986,10 +1986,27 @@ local function RBS_BuildOneCDRow(i)
 	-- there's no RegisterForClicks -- EnableMouse + OnMouseDown reading arg1 for which button, same
 	-- as this project's own established pattern elsewhere (OnMouseUp is confirmed unreliable on a
 	-- plain CreateFrame("Frame") on this client).
+	--
+	-- FIXED (2026-09-03, real report: left-click-drag on the CD window stopped working entirely)
+	-- -- EnableMouse(true) on every row means a row now claims ALL mouse input over the ENTIRE
+	-- window (it has no border/backdrop/title-bar gap to grab -- see RBS_CreateCDFrame's own
+	-- "borderless" comment), so RaidBuffStatusCDFrame's own RegisterForDrag("LeftButton") never sees
+	-- the click anymore once a row sits on top of it. Fix: give the ROW its own drag registration
+	-- that moves the PARENT frame -- RegisterForDrag/OnDragStart/OnDragStop are a different script
+	-- pair from OnMouseUp (the one actually confirmed unreliable here), so this is safe, and
+	-- StartMoving()/StopMovingOrSizing() work on whichever frame you call them on regardless of which
+	-- frame's own OnDragStart triggered the call.
 	row:EnableMouse(true)
 	row:SetScript("OnMouseDown", RBS_CDRow_OnClick)
 	row:SetScript("OnEnter", RBS_CDRow_OnEnter)
 	row:SetScript("OnLeave", RBS_CDRow_OnLeave)
+	row:RegisterForDrag("LeftButton")
+	row:SetScript("OnDragStart", function()
+		RaidBuffStatusCDFrame:StartMoving()
+	end)
+	row:SetScript("OnDragStop", function()
+		RaidBuffStatusCDFrame:StopMovingOrSizing()
+	end)
 
 	row:Hide()
 	RBS_CDRows[i] = row
