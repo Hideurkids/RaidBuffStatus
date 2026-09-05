@@ -66,7 +66,7 @@ end
 -- actually running, without having to ask the user to check -- also flags whether a stale/second
 -- copy of this addon (e.g. a leftover install of the old reference folder reusing the same global
 -- names) might be clobbering these functions after this file loads.
-RBS_BUILD = "v72-perf-cdbuffscan-combatlog-skip"
+RBS_BUILD = "v73-missing-prefix-single-dash"
 
 -- CONFIRMED via real raid testing (2026-08-31): right after a disconnect/reconnect (server kick,
 -- zone in, etc.), C_UnitAuras.GetAuraDataByIndex can return NOTHING for a window of several
@@ -644,7 +644,9 @@ function RBS_AnnounceOneBuff(def, channel)
 			else
 				list = RBS_JoinNames(missing)
 			end
-			local line = def.label .. " = " .. list
+			-- "Missing " prefix (2026-09-05, per the user): plain "Label = Names" read as ambiguous
+			-- in chat -- unclear at a glance whether the names listed HAVE the buff or lack it.
+			local line = "Missing " .. def.label .. " = " .. list
 			if channel then
 				SendChatMessage(line, channel)
 			else
@@ -2188,7 +2190,7 @@ function RBS_CDRow_OnEnter()
 	end
 	GameTooltip:SetOwner(this, "ANCHOR_RIGHT")
 	GameTooltip:AddLine(def.label, 1, 1, 1)
-	GameTooltip:AddLine(this.rbsCaster .. " -- " .. RBS_CDRow_StatusText(), 0.8, 0.8, 0.8)
+	GameTooltip:AddLine(this.rbsCaster .. " - " .. RBS_CDRow_StatusText(), 0.8, 0.8, 0.8)
 	GameTooltip:AddLine(" ")
 	GameTooltip:AddLine("Right-click: announce to raid/party.", 0.6, 0.6, 0.6)
 	GameTooltip:Show()
@@ -2207,7 +2209,7 @@ function RBS_CDRow_OnClick()
 		return
 	end
 	local channel = RBS_AnnounceChannel()
-	local msg = this.rbsCaster .. " -- " .. def.label .. ": " .. RBS_CDRow_StatusText()
+	local msg = this.rbsCaster .. " - " .. def.label .. ": " .. RBS_CDRow_StatusText()
 	if channel then
 		pcall(SendChatMessage, msg, channel)
 	else
@@ -2954,7 +2956,7 @@ function RBS_OnLoad()
 			for key, readyAt in pairs(RBS_CDState) do
 				count = count + 1
 				local remaining = readyAt - GetTime()
-				DEFAULT_CHAT_FRAME:AddMessage("  " .. key .. " -- " .. math.floor(remaining) .. "s left")
+				DEFAULT_CHAT_FRAME:AddMessage("  " .. key .. " - " .. math.floor(remaining) .. "s left")
 			end
 			if count == 0 then
 				DEFAULT_CHAT_FRAME:AddMessage("  RBS_CDState is empty -- nothing has been detected as cast yet.")

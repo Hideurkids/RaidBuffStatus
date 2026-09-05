@@ -58,8 +58,8 @@ own content (so a short last row doesn't look left-aligned).
 Posts one line per buff that at least one person is missing (buffs everyone has are skipped) to
 raid chat, or party chat if you're not in a raid:
 ```
-Fortitude = Nydeh
-Flask = Too many!
+Missing Fortitude = Nydeh
+Missing Flask = Too many!
 ```
 A buff missing from more than a few people prints "Too many!" instead of a long name list.
 
