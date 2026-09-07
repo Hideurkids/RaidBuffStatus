@@ -55,13 +55,14 @@ recalculates how many icons fit per row live as you drag, and each row centers i
 own content (so a short last row doesn't look left-aligned).
 
 ### Announce button
-Posts one line per buff that at least one person is missing (buffs everyone has are skipped) to
-raid chat, or party chat if you're not in a raid:
+Posts the status of every buff that at least one person is missing (buffs everyone has are
+skipped) to raid chat, or party chat if you're not in a raid:
 ```
-Missing Fortitude = Nydeh
-Missing Flask = Too many!
+Missing Fortitude: Nydeh | Missing Flask: Nydeh, Danlyr, Siurufa
 ```
-A buff missing from more than a few people prints "Too many!" instead of a long name list.
+Packs as many buffs as fit into a single 250-character message before starting a new one, instead
+of one message per buff -- a buff missing from many people spills onto a continuation line rather
+than ever saying "Too many!" or dropping names.
 
 ### Death warnings
 Optional (Options → RaidAssist): an on-screen alert, a sound, and a raid/party chat message
@@ -111,7 +112,7 @@ as cooldowns start and end.
 
 Currently tracks: Innervate, Battle Rez, Bloodlust, Heroism, Spirit Link, Ascendance, Lightwell,
 Tranquility, Shield Wall, Challenging Shout, Berserker Rage, Pummel, Disarm, Lay on Hands,
-Blessing of Protection, Divine Shield, Divine Intervention, Challenging Roar, Mana Tide Totem,
+Blessing of Protection, Divine Shield, Divine Intervention, Challenging Roar,
 Reincarnation, Tranquilizing Shot, Kick, Vanish, and Evasion — each individually toggleable in
 Options → Cooldowns (turning off abilities you don't care about keeps the list shorter). Bloodlust
 and Heroism are gated to the caster's actual faction, so a single Shaman never shows both.
@@ -171,8 +172,6 @@ addons, split into General, RaidAssist, Healers, Tanks, and Cooldowns tabs.
   `UNIT_CASTEVENT`) for the cooldown tracker, for troubleshooting.
 - **`/rbs cdstate`** — dumps the cooldown tracker's current internal state (enabled? window shown?
   what's actively tracked right now) straight to chat.
-- **`/rbs cdtest`** — injects a fake 30-second cooldown so the cooldown window's position/rendering
-  can be checked without waiting for a real cast.
 - **`/rbs overload`** — toggles 25 synthetic cooldown rows, for testing the row-limit/column-wrap
   layout without needing a real 25-person raid on cooldown.
 - **`/rbs ssdebug`** — toggles verbose tooltip output for Soulstone caster detection, for

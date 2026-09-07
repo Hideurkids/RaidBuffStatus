@@ -66,7 +66,7 @@ end
 -- actually running, without having to ask the user to check -- also flags whether a stale/second
 -- copy of this addon (e.g. a leftover install of the old reference folder reusing the same global
 -- names) might be clobbering these functions after this file loads.
-RBS_BUILD = "v73-missing-prefix-single-dash"
+RBS_BUILD = "v78-announce-cont-no-prefix"
 
 -- CONFIRMED via real raid testing (2026-08-31): right after a disconnect/reconnect (server kick,
 -- zone in, etc.), C_UnitAuras.GetAuraDataByIndex can return NOTHING for a window of several
@@ -161,14 +161,18 @@ local function RBS_ScanBuff(def)
 	local missing = {}
 	local providers = {}
 
-	local function checkUnit(unit)
-		if not UnitExists(unit) then
-			return
-		end
-		local name = UnitName(unit) or unit
+	-- Reuses the shared 1s-cached roster (see RBS_GetCachedRoster, defined further down but a plain
+	-- global so this earlier-defined local function can still call it -- same cross-section pattern
+	-- already used throughout this file) instead of its own UnitExists/UnitClass pass -- this is
+	-- called on every tooltip hover, so a user sweeping across several icons in the same second no
+	-- longer re-walks the whole roster from scratch each time.
+	local roster = RBS_GetCachedRoster()
+	for r = 1, table.getn(roster), 1 do
+		local person = roster[r]
+		local unit = person.unit
+		local name = person.name
 
-		local okClass, class = pcall(UnitClass, unit)
-		if def.class and okClass and class == def.class then
+		if def.class and person.class == def.class then
 			table.insert(providers, name)
 		end
 
@@ -190,17 +194,6 @@ local function RBS_ScanBuff(def)
 		end
 	end
 
-	if GetNumRaidMembers() > 0 then
-		for i = 1, GetNumRaidMembers(), 1 do
-			checkUnit("raid" .. i)
-		end
-	else
-		checkUnit("player")
-		for i = 1, GetNumPartyMembers(), 1 do
-			checkUnit("party" .. i)
-		end
-	end
-
 	return missing, providers
 end
 
@@ -213,6 +206,43 @@ local function RBS_JoinNames(list)
 		out = out .. ", " .. list[i]
 	end
 	return out
+end
+
+-- Chat messages on this client top out at 250 characters (confirmed 2026-09-08, per the user).
+local RBS_CHAT_MSG_MAX_LEN = 250
+
+-- Packs `names` (comma-separated) into one or more chat-message-length-safe lines instead of the
+-- old flat "more than N names -> say 'Too many!'" cutoff (2026-09-08, per the user: use the real
+-- 250-char budget instead of an arbitrary name count, and never drop/truncate names -- if the full
+-- list doesn't fit on one line, the NEXT line continues it rather than cutting anyone off). `prefix`
+-- opens the first line; every line after that is just more names, no repeated prefix (2026-09-08,
+-- per the user: continue straight with names, not a "[Buff] (cont.):" label). A single name that
+-- plus the running line still doesn't fit under `maxLen` (a near-`maxLen`-length name, essentially
+-- never happens with real WoW names) still gets its own line rather than being silently dropped --
+-- this can only ever exceed `maxLen`, never lose data.
+local function RBS_PackNameLines(prefix, names, maxLen)
+	local lines = {}
+	local current = prefix
+	local firstOnLine = true
+	for i = 1, table.getn(names), 1 do
+		local name = names[i]
+		local piece
+		if firstOnLine then
+			piece = name
+		else
+			piece = ", " .. name
+		end
+		if string.len(current .. piece) <= maxLen then
+			current = current .. piece
+			firstOnLine = false
+		else
+			table.insert(lines, current)
+			current = name
+			firstOnLine = false
+		end
+	end
+	table.insert(lines, current)
+	return lines
 end
 
 ------------------------------------------------------------------------------------------------------
@@ -286,14 +316,17 @@ local function RBS_ScanSoulstone()
 	local holders = {}
 	local warlocks = {}
 
-	local function checkUnit(unit)
-		if not UnitExists(unit) then
-			return
-		end
-		local name = UnitName(unit) or unit
+	-- Reuses the shared 1s-cached roster (see RBS_GetCachedRoster, a plain global defined further
+	-- down this file, same cross-section pattern used throughout) instead of its own UnitExists/
+	-- UnitClass pass -- this runs on every periodic dashboard tick AND every Soulstone tooltip
+	-- hover.
+	local roster = RBS_GetCachedRoster()
+	for r = 1, table.getn(roster), 1 do
+		local person = roster[r]
+		local unit = person.unit
+		local name = person.name
 
-		local okClass, class = pcall(UnitClass, unit)
-		if okClass and class == "Warlock" then
+		if person.class == "Warlock" then
 			local until_ = RBS_SoulstoneCooldownUntil[name]
 			local remaining = 0
 			if until_ then
@@ -335,17 +368,6 @@ local function RBS_ScanSoulstone()
 		RBS_SoulstoneHadIt[name] = hasIt
 	end
 
-	if GetNumRaidMembers() > 0 then
-		for i = 1, GetNumRaidMembers(), 1 do
-			checkUnit("raid" .. i)
-		end
-	else
-		checkUnit("player")
-		for i = 1, GetNumPartyMembers(), 1 do
-			checkUnit("party" .. i)
-		end
-	end
-
 	return holders, warlocks
 end
 
@@ -368,9 +390,12 @@ local RBS_ICON_GAP = 4
 local RBS_ICON_TOP = -22
 -- Vertical space reserved at the bottom of the window for the "Announce" button.
 local RBS_ANNOUNCE_HEIGHT = 22
--- Above this many missing names for one buff, the announce message says "Too many!" instead of
--- listing them -- keeps a single chat line readable instead of it running off past the raid chat's
--- wrap width when almost nobody has a buff (very common for Flask/Well Fed).
+-- Above this many missing names, the WHISPER-providers message (RBS_WhisperProvidersForBuff) says
+-- "Too many!" instead of listing them -- that's a single fixed-length sentence sent to individual
+-- providers, not a packed multi-line announce, so the flat cutoff still applies there. The raid/
+-- party ANNOUNCE path no longer uses this at all -- see RBS_PackNameLines/RBS_CHAT_MSG_MAX_LEN
+-- above (2026-09-08, per the user: pack real chat-length-safe lines instead of an arbitrary name
+-- count, never drop names).
 local RBS_ANNOUNCE_MAX_NAMES = 5
 
 -- Plain globals, not `local` -- a diagnostic trace confirmed a plain local here was not reliably
@@ -594,15 +619,24 @@ function RBS_AnnounceChannel()
 	return nil
 end
 
--- Announces ONE buff def's state to raid/party chat (or local chat if solo) -- extracted
--- (2026-09-02, per the user) from RBS_AnnounceMissing's per-buff loop body so a single buff icon's
--- left-click can reuse the exact same logic instead of duplicating it. Soulstone keeps its own
--- shape (see the comment inline below); every other def uses the plain missing-list format. Skips
--- silently if there's nothing worth announcing (nobody missing it / no warlocks free) -- callers
--- that want to tell the CLICKER that nothing needed announcing should check RBS_ScanBuff/
--- RBS_ScanSoulstone themselves first, same as the tooltip already does. Global for the same
--- ordering reason as RBS_AnnounceChannel just above.
-function RBS_AnnounceOneBuff(def, channel)
+-- Sends one already-built announce line to raid/party chat, or local chat if solo/no channel.
+-- Shared by RBS_AnnounceOneBuff and RBS_AnnounceMissing (2026-09-08) so both go through the exact
+-- same send path. Global for the same ordering reason as RBS_AnnounceChannel above.
+function RBS_SendAnnounceLine(text, channel)
+	if channel then
+		SendChatMessage(text, channel)
+	else
+		DEFAULT_CHAT_FRAME:AddMessage("|cFF00CCFFRaidBuffStatus:|r " .. text)
+	end
+end
+
+-- Builds the announce line(s) for ONE buff def -- an array of already-message-length-safe strings
+-- (see RBS_PackNameLines), empty if there's nothing worth announcing (nobody missing it / no
+-- warlocks free). Extracted (2026-09-08) from RBS_AnnounceOneBuff so RBS_AnnounceMissing can also
+-- combine several buffs' segments into shared messages instead of one message per buff. Soulstone
+-- keeps its own line shape (see inline comment below); every other def uses the plain missing-list
+-- format. Global for the same ordering reason as RBS_AnnounceChannel above.
+function RBS_BuildAnnounceSegments(def)
 	if def.special == "soulstone" then
 		-- Soulstone gets its own announce shape (2026-08-30, per the user): RBS_ScanBuff's ordinary
 		-- "missing" semantics don't apply (not everyone is supposed to have one), but "how many
@@ -616,43 +650,38 @@ function RBS_AnnounceOneBuff(def, channel)
 			end
 		end
 		local availableCount = table.getn(availableNames)
-		if availableCount > 0 then
-			local list
-			if availableCount > RBS_ANNOUNCE_MAX_NAMES then
-				list = "Too many!"
-			else
-				list = RBS_JoinNames(availableNames)
-			end
-			local plural = ""
-			if availableCount > 1 then
-				plural = "s"
-			end
-			local line = availableCount .. " Soulstone" .. plural .. " not assigned yet: " .. list
-			if channel then
-				SendChatMessage(line, channel)
-			else
-				DEFAULT_CHAT_FRAME:AddMessage("|cFF00CCFFRaidBuffStatus:|r " .. line)
-			end
+		if availableCount == 0 then
+			return {}
 		end
-	else
-		local missing = RBS_ScanBuff(def)
-		local missingCount = table.getn(missing)
-		if missingCount > 0 then
-			local list
-			if missingCount > RBS_ANNOUNCE_MAX_NAMES then
-				list = "Too many!"
-			else
-				list = RBS_JoinNames(missing)
-			end
-			-- "Missing " prefix (2026-09-05, per the user): plain "Label = Names" read as ambiguous
-			-- in chat -- unclear at a glance whether the names listed HAVE the buff or lack it.
-			local line = "Missing " .. def.label .. " = " .. list
-			if channel then
-				SendChatMessage(line, channel)
-			else
-				DEFAULT_CHAT_FRAME:AddMessage("|cFF00CCFFRaidBuffStatus:|r " .. line)
-			end
+		local plural = ""
+		if availableCount > 1 then
+			plural = "s"
 		end
+		local prefix = availableCount .. " Soulstone" .. plural .. " not assigned yet: "
+		return RBS_PackNameLines(prefix, availableNames, RBS_CHAT_MSG_MAX_LEN)
+	end
+
+	local missing = RBS_ScanBuff(def)
+	if table.getn(missing) == 0 then
+		return {}
+	end
+	-- "Missing " prefix (2026-09-05, per the user): plain "Label = Names" read as ambiguous in
+	-- chat -- unclear at a glance whether the names listed HAVE the buff or lack it. ":" instead of
+	-- "=" (2026-09-08, per the user).
+	local prefix = "Missing " .. def.label .. ": "
+	return RBS_PackNameLines(prefix, missing, RBS_CHAT_MSG_MAX_LEN)
+end
+
+-- Announces ONE buff def's state to raid/party chat (or local chat if solo) -- extracted
+-- (2026-09-02, per the user) from RBS_AnnounceMissing's per-buff loop body so a single buff icon's
+-- left-click can reuse the exact same logic instead of duplicating it. Skips silently if there's
+-- nothing worth announcing -- callers that want to tell the CLICKER that nothing needed announcing
+-- should check RBS_ScanBuff/RBS_ScanSoulstone themselves first, same as the tooltip already does.
+-- Global for the same ordering reason as RBS_AnnounceChannel just above.
+function RBS_AnnounceOneBuff(def, channel)
+	local lines = RBS_BuildAnnounceSegments(def)
+	for i = 1, table.getn(lines), 1 do
+		RBS_SendAnnounceLine(lines[i], channel)
 	end
 end
 
@@ -719,9 +748,16 @@ function RBS_BuffIcon_OnClick()
 	end
 end
 
--- Posts, for every buff currently missing at least one person, one line to raid/party chat (or
--- just the local chat window if solo) listing who's missing it -- e.g. "Fortitude = Nydeh". A buff
--- nobody is missing is skipped entirely rather than announcing "(nobody)" as spam.
+-- Posts, for every buff currently missing at least one person, its status to raid/party chat (or
+-- just the local chat window if solo) -- e.g. "Missing Fortitude: Nydeh". A buff nobody is missing
+-- is skipped entirely rather than announcing "(nobody)" as spam.
+--
+-- PACKING (2026-09-08, per the user): rather than one chat message per buff (RBS_ANNOUNCE_MAX_NAMES
+-- names max, "Too many!" past that), every buff's own segment(s) (RBS_BuildAnnounceSegments, already
+-- 250-char-safe on their own) get combined -- as many WHOLE segments as fit -- into shared messages
+-- separated by " | ", instead of wasting a whole message on a buff missing from just one or two
+-- people. This also means fewer total messages sent for the same information, which helps avoid
+-- tripping the client's/server's chat flood protection on a raid missing several buffs at once.
 local function RBS_AnnounceMissing()
 	-- See RBS_ScanSuppressUntil's own comment (top of file) -- refuse to announce at all right after
 	-- a reconnect, rather than blasting the whole raid with a false "everyone is missing everything"
@@ -734,8 +770,28 @@ local function RBS_AnnounceMissing()
 	end
 
 	local channel = RBS_AnnounceChannel()
+
+	local combined = ""
 	for b = 1, table.getn(RBS_BUFF_LIST), 1 do
-		RBS_AnnounceOneBuff(RBS_BUFF_LIST[b], channel)
+		local segments = RBS_BuildAnnounceSegments(RBS_BUFF_LIST[b])
+		for s = 1, table.getn(segments), 1 do
+			local seg = segments[s]
+			local candidate
+			if combined == "" then
+				candidate = seg
+			else
+				candidate = combined .. " | " .. seg
+			end
+			if string.len(candidate) <= RBS_CHAT_MSG_MAX_LEN then
+				combined = candidate
+			else
+				RBS_SendAnnounceLine(combined, channel)
+				combined = seg
+			end
+		end
+	end
+	if combined ~= "" then
+		RBS_SendAnnounceLine(combined, channel)
 	end
 end
 
@@ -785,6 +841,65 @@ local function RBS_BuildHeader()
 	RBS_ReflowIcons()
 end
 
+-- PERFORMANCE (2026-09-07, per the user: reduce resource usage further without losing any
+-- functionality). Three different ~1-second-interval consumers (RBS_UpdateCooldowns,
+-- RBS_ScanCDBuffs, RBS_CheckDeaths) each independently rebuilt their own raid/party roster from
+-- scratch every tick -- each its own UnitExists/UnitName/UnitClass/UnitFactionGroup pass over up to
+-- 40 raid members, none sharing results with the others despite running one right after another
+-- (RBS_ScanCDBuffs and RBS_UpdateCooldowns are literally called back-to-back from the same
+-- RBS_CDFrameOnUpdate tick). This builds the roster ONCE and caches it for 1 second (matching the
+-- ~1s tick rate every consumer already runs at), so at most one real roster walk happens per real
+-- second regardless of how many separate functions ask for it in that window. A roster up to 1s
+-- stale is never a correctness problem here -- someone joining/leaving mid-second is picked up on
+-- the very next refresh, same as before this change (every consumer was already only ever as fresh
+-- as its own last ~1s tick).
+RBS_RosterCache = nil
+RBS_RosterCacheTime = 0
+local RBS_ROSTER_CACHE_TTL = 1
+
+function RBS_GetCachedRoster()
+	local now = GetTime()
+	if RBS_RosterCache and (now - RBS_RosterCacheTime) < RBS_ROSTER_CACHE_TTL then
+		return RBS_RosterCache
+	end
+
+	local roster = {}
+	local function addUnit(unit)
+		if not UnitExists(unit) then
+			return
+		end
+		-- Include the unit as long as it EXISTS, regardless of whether class/faction resolved --
+		-- matches RBS_ScanBuff's own original leniency (a unit that exists but whose class briefly
+		-- fails to resolve should still count for buff-missing/death-tracking purposes, just not
+		-- match any class-gated check). `name` falls back to the raw unit token, never nil, same as
+		-- RBS_ScanBuff's own prior `UnitName(unit) or unit`.
+		local name = UnitName(unit) or unit
+		local okClass, class = pcall(UnitClass, unit)
+		local okFaction, faction = pcall(UnitFactionGroup, unit)
+		table.insert(roster, {
+			unit = unit,
+			name = name,
+			class = okClass and class or nil,
+			faction = okFaction and faction or nil,
+		})
+	end
+
+	if GetNumRaidMembers() > 0 then
+		for i = 1, GetNumRaidMembers(), 1 do
+			addUnit("raid" .. i)
+		end
+	else
+		addUnit("player")
+		for i = 1, GetNumPartyMembers(), 1 do
+			addUnit("party" .. i)
+		end
+	end
+
+	RBS_RosterCache = roster
+	RBS_RosterCacheTime = now
+	return roster
+end
+
 -- PERFORMANCE (2026-09-04, per the user: pfDebug's profiler showed RaidBuffStatus as the single
 -- highest CPU/memory-consuming addon a tester had installed). Root cause: the periodic dashboard
 -- tick used to call RBS_ScanBuff(def) once PER buff definition (~13 of them), and EACH of those
@@ -813,10 +928,12 @@ local function RBS_ScanAllBuffCounts()
 		end
 	end
 
-	local function checkUnit(unit)
-		if not UnitExists(unit) then
-			return
-		end
+	-- Reuses the shared 1s-cached roster (see RBS_GetCachedRoster above) instead of its own
+	-- UnitExists/UnitName/UnitClass/UnitFactionGroup pass -- this scan only ever needed the unit
+	-- token anyway, so it was doing strictly more work than necessary even before the cache existed.
+	local roster = RBS_GetCachedRoster()
+	for p = 1, table.getn(roster), 1 do
+		local unit = roster[p].unit
 		local matched = {}
 		local index = 1
 		while true do
@@ -839,17 +956,6 @@ local function RBS_ScanAllBuffCounts()
 			if def.special ~= "soulstone" and not matched[def.id] then
 				counts[def.id] = counts[def.id] + 1
 			end
-		end
-	end
-
-	if GetNumRaidMembers() > 0 then
-		for i = 1, GetNumRaidMembers(), 1 do
-			checkUnit("raid" .. i)
-		end
-	else
-		checkUnit("player")
-		for i = 1, GetNumPartyMembers(), 1 do
-			checkUnit("party" .. i)
 		end
 	end
 
@@ -1312,54 +1418,42 @@ local function RBS_CheckDeaths()
 		return
 	end
 
-	local roster = {}
+	-- Reuses the shared 1s-cached roster (see RBS_GetCachedRoster above) instead of its own
+	-- UnitExists/UnitName pass every tick.
 	local inRaid = GetNumRaidMembers() > 0
-	if inRaid then
-		for i = 1, GetNumRaidMembers(), 1 do
-			table.insert(roster, "raid" .. i)
-		end
-	else
-		table.insert(roster, "player")
-		for i = 1, GetNumPartyMembers(), 1 do
-			table.insert(roster, "party" .. i)
-		end
-	end
+	local roster = RBS_GetCachedRoster()
 
 	for i = 1, table.getn(roster), 1 do
-		local unit = roster[i]
-		if UnitExists(unit) then
-			local name = UnitName(unit)
-			if name then
-				-- CONFIRMED (2026-08-31, per the user): a Hunter using Feign Death got announced as
-				-- dead. UnitIsDeadOrGhost() is fooled by Feign Death on this client (a known vanilla
-				-- API quirk, not specific to this addon) -- UnitIsFeignDeath(unit) is the real vanilla
-				-- API that exists specifically to tell the two apart, so it's excluded here.
-				local isDead = (UnitIsDeadOrGhost(unit) and not UnitIsFeignDeath(unit)) and true or false
-				-- State is recorded BEFORE attempting the announcement, and the announcement itself
-				-- is pcall-wrapped -- confirmed live (2026-08-29): RaidNotice_AddMessage doesn't
-				-- exist on this client, and because that error unwound the whole function before
-				-- reaching this state update, RBS_DeathState[name] never advanced past false, so the
-				-- SAME death kept re-triggering (and re-erroring) on every 1-second check forever. A
-				-- failed announcement must never be able to jam the death-transition tracking itself.
-				local justDied = isDead and RBS_DeathState[name] == false
-				RBS_DeathState[name] = isDead
-				if justDied then
-					local msg = name .. " has died!"
-					-- UIErrorsFrame is the small red on-screen error text, universally present on
-					-- this client (unlike RaidWarningFrame/RaidNotice_AddMessage, confirmed absent).
-					local ok, err = pcall(UIErrorsFrame.AddMessage, UIErrorsFrame, msg, 1, 0.2, 0.2, 1, 6)
-					if not ok then
-						DEFAULT_CHAT_FRAME:AddMessage(
-							"|cFF00CCFFRaidBuffStatus:|r |cFFFF0000death warning display failed:|r " .. tostring(err)
-						)
-					end
-					pcall(PlaySound, "RaidWarning")
-					if inRaid then
-						pcall(SendChatMessage, msg, "RAID")
-					elseif GetNumPartyMembers() > 0 then
-						pcall(SendChatMessage, msg, "PARTY")
-					end
-				end
+		local unit = roster[i].unit
+		local name = roster[i].name
+		-- CONFIRMED (2026-08-31, per the user): a Hunter using Feign Death got announced as
+		-- dead. UnitIsDeadOrGhost() is fooled by Feign Death on this client (a known vanilla
+		-- API quirk, not specific to this addon) -- UnitIsFeignDeath(unit) is the real vanilla
+		-- API that exists specifically to tell the two apart, so it's excluded here.
+		local isDead = (UnitIsDeadOrGhost(unit) and not UnitIsFeignDeath(unit)) and true or false
+		-- State is recorded BEFORE attempting the announcement, and the announcement itself
+		-- is pcall-wrapped -- confirmed live (2026-08-29): RaidNotice_AddMessage doesn't
+		-- exist on this client, and because that error unwound the whole function before
+		-- reaching this state update, RBS_DeathState[name] never advanced past false, so the
+		-- SAME death kept re-triggering (and re-erroring) on every 1-second check forever. A
+		-- failed announcement must never be able to jam the death-transition tracking itself.
+		local justDied = isDead and RBS_DeathState[name] == false
+		RBS_DeathState[name] = isDead
+		if justDied then
+			local msg = name .. " has died!"
+			-- UIErrorsFrame is the small red on-screen error text, universally present on
+			-- this client (unlike RaidWarningFrame/RaidNotice_AddMessage, confirmed absent).
+			local ok, err = pcall(UIErrorsFrame.AddMessage, UIErrorsFrame, msg, 1, 0.2, 0.2, 1, 6)
+			if not ok then
+				DEFAULT_CHAT_FRAME:AddMessage(
+					"|cFF00CCFFRaidBuffStatus:|r |cFFFF0000death warning display failed:|r " .. tostring(err)
+				)
+			end
+			pcall(PlaySound, "RaidWarning")
+			if inRaid then
+				pcall(SendChatMessage, msg, "RAID")
+			elseif GetNumPartyMembers() > 0 then
+				pcall(SendChatMessage, msg, "PARTY")
 			end
 		end
 	end
@@ -1367,7 +1461,7 @@ end
 
 ------------------------------------------------------------------------------------------------------
 -- RAID COOLDOWN TRACKER (per the user's request, 2026-08-30) -- Innervate, Battle Rez,
--- Bloodlust/Heroism, Spirit Link Totem, Ascendance, etc.
+-- Bloodlust/Heroism, Spirit Link, Ascendance, etc.
 --
 -- Explicitly does NOT require anyone else in the raid to run this addon. The common alternative
 -- design -- every relevant class member runs the same addon themselves, reads their OWN spellbook
@@ -1405,7 +1499,7 @@ end
 -- ever appear on the person who cast it (Evasion, Berserker Rage, Divine Shield, Shield Wall), so
 -- the caster IS just whoever the buff appeared on -- no further lookup needed. Without
 -- `selfOnly`, the buff can land on someone OTHER than the caster (Innervate on your target,
--- Blessing of Protection on an ally, Bloodlust/Heroism/Mana Tide/Spirit Link on the whole raid), so
+-- Blessing of Protection on an ally, Bloodlust/Heroism/Spirit Link on the whole raid), so
 -- the caster is resolved via the aura tooltip's "Cast by" line -- the same trick already proven for
 -- Soulstone (RBS_SoulstoneTipCaster), generalized here as RBS_CDTipCaster. Combat log detection
 -- (RBS_OnCombatLogCooldowns above) is NOT removed for entries that also have a `buffName` -- it's
@@ -1428,8 +1522,9 @@ RBS_CD_LIST = {
 	-- talentGated = true (2026-09-02, CONFIRMED by the user): Bloodlust/Heroism/Spirit Link
 	-- Totem/Ascendance are talent picks on this server, not baseline class abilities -- read by the
 	-- talent-scan module below (RBS_TalentGate_*) to optionally hide a person's row if they're
-	-- confirmed to lack the talent. Lightwell and Mana Tide Totem were explicitly confirmed BASELINE
-	-- by the user, so they're deliberately left without this field.
+	-- confirmed to lack the talent. Lightwell was explicitly confirmed BASELINE by the user, so it's
+	-- deliberately left without this field. (Mana Tide Totem doesn't exist on this server at all --
+	-- no entry for it here; see SPIRITLINK below.)
 	-- faction (2026-09-03, per the user: a single Shaman was showing BOTH rows at once, "2 veces el
 	-- BL") -- Bloodlust/Heroism are the exact same spell, just named per faction; nobody can ever
 	-- have both. Gates each entry to only the roster members of that faction (see the `faction` check
@@ -1444,9 +1539,11 @@ RBS_CD_LIST = {
 	-- it" for someone who WAS actually scanned -- if it's still showing for someone who lacks it,
 	-- that means their scan hasn't completed at all yet, not that the match itself was wrong; keep
 	-- testing after this fix). Also confirmed a Row-7 Restoration CAPSTONE talent (not baseline),
-	-- confirming the earlier talentGated=true was already correct -- and that taking it REPLACES Mana
-	-- Tide Totem entirely for that Shaman (MANATIDE below is left as-is for now, still shown
-	-- unconditionally -- the mutual-exclusion case is real but out of scope for this specific fix).
+	-- confirming the earlier talentGated=true was already correct. CORRECTED (2026-09-07, per the
+	-- user): earlier notes here assumed Mana Tide Totem still existed as a baseline ability that
+	-- Spirit Link merely replaces for shamans who pick the capstone -- wrong. Mana Tide Totem
+	-- doesn't exist on this server at all, for anyone; Spirit Link is the only real ability. There
+	-- is deliberately no MANATIDE entry in this list anymore.
 	{ id = "SPIRITLINK", label = "Spirit Link",       icon = "Interface\\Icons\\Spell_Nature_SpiritLink",    class = "Shaman", spellName = "Spirit Link",       buffName = "Spirit Link",       cooldown = 3 * 60, talentGated = true },
 	-- CONFIRMED (2026-09-02, from the user's own in-game spellbook tooltip): "Requires 1 point in
 	-- Spirit of Redemption / Requires 30 points in Holy Talents", "5 min cooldown", "SpellID: 52962"
@@ -1493,7 +1590,9 @@ RBS_CD_LIST = {
 	-- doesn't leave a clean discrete aura to scan for the way a selfOnly buff does -- relies on the
 	-- UNIT_CASTEVENT detection path instead (see RBS_OnUnitCastEvent), same as Kick/Challenging Shout.
 	{ id = "TRANQUILITY",       label = "Tranquility",           icon = "Interface\\Icons\\Spell_Nature_Tranquility",       class = "Druid",   spellName = "Tranquility",            cooldown = 8 * 60 },
-	{ id = "MANATIDE",          label = "Mana Tide Totem",       icon = "Interface\\Icons\\Spell_Frost_SummonWaterElemental",class = "Shaman",  spellName = "Mana Tide Totem",       buffName = "Mana Tide Totem", cooldown = 5 * 60 },
+	-- REMOVED (2026-09-07, confirmed by the user): Mana Tide Totem doesn't exist on this server at
+	-- all -- Spirit Link (above) is the only real ability here, not a talent-gated alternative to a
+	-- baseline Mana Tide Totem the way earlier notes in this file assumed.
 	{ id = "REINCARNATION",     label = "Reincarnation",         icon = "Interface\\Icons\\Spell_Nature_Reincarnation",     class = "Shaman",  spellName = "Reincarnation",         cooldown = 30 * 60 },
 	-- UNCONFIRMED even that this HAS a meaningful spell cooldown at all in vanilla-era data (it may
 	-- just be gated by the hunter's normal ranged attack timer, not a real cooldown) -- included for
@@ -1906,7 +2005,7 @@ RBS_CDBuffHadIt = {}
 -- PERFORMANCE (2026-09-04, per the user, same finding as RBS_ScanAllBuffCounts above -- this one is
 -- actually WORSE, since it runs on the CD tracker's 1-second tick instead of the dashboard's 2-
 -- second one): used to walk EVERY unit's entire aura list independently once PER tracked buffName
--- ability (Innervate, Bloodlust, Heroism, Spirit Link, Lightwell, Mana Tide, Shield Wall, Divine
+-- ability (Innervate, Bloodlust, Heroism, Spirit Link, Lightwell, Shield Wall, Divine
 -- Shield, Evasion, Vanish, ...) -- an O(abilities * people * auras-per-person) pile of native
 -- C_UnitAuras.GetAuraDataByIndex calls every second. Now walks each unit's aura list ONCE, checking
 -- every tracked buffName ability against that single pass. Exact same hasIt/transition/caster-
@@ -1930,11 +2029,10 @@ function RBS_ScanCDBuffs()
 		end
 	end
 
-	local function checkUnit(unit)
-		if not UnitExists(unit) or trackedCount == 0 then
+	local function checkUnit(unit, name)
+		if trackedCount == 0 then
 			return
 		end
-		local name = UnitName(unit) or unit
 
 		-- ONE aura-list walk for this unit, recording which tracked buffs matched (and at which
 		-- index, needed later for the "Cast by:" tooltip lookup on a non-selfOnly entry).
@@ -1980,15 +2078,12 @@ function RBS_ScanCDBuffs()
 		end
 	end
 
-	if GetNumRaidMembers() > 0 then
-		for i = 1, GetNumRaidMembers(), 1 do
-			checkUnit("raid" .. i)
-		end
-	else
-		checkUnit("player")
-		for i = 1, GetNumPartyMembers(), 1 do
-			checkUnit("party" .. i)
-		end
+	-- Reuses the shared 1s-cached roster (see RBS_GetCachedRoster above) instead of its own
+	-- UnitExists/UnitName pass every tick -- runs on the same ~1s cadence as RBS_UpdateCooldowns
+	-- (both are called back-to-back from RBS_CDFrameOnUpdate), so they now share one roster walk.
+	local roster = RBS_GetCachedRoster()
+	for p = 1, table.getn(roster), 1 do
+		checkUnit(roster[p].unit, roster[p].name)
 	end
 end
 
@@ -2330,37 +2425,11 @@ local function RBS_UpdateCooldowns()
 		end
 	end
 
-	local roster = {}
-	if GetNumRaidMembers() > 0 then
-		for i = 1, GetNumRaidMembers(), 1 do
-			local unit = "raid" .. i
-			if UnitExists(unit) then
-				local name = UnitName(unit)
-				local okClass, class = pcall(UnitClass, unit)
-				local okFaction, faction = pcall(UnitFactionGroup, unit)
-				if name and okClass then
-					table.insert(roster, { name = name, class = class, faction = okFaction and faction or nil })
-				end
-			end
-		end
-	else
-		local okSelf, selfClass = pcall(UnitClass, "player")
-		if okSelf then
-			local okSelfFaction, selfFaction = pcall(UnitFactionGroup, "player")
-			table.insert(roster, { name = UnitName("player"), class = selfClass, faction = okSelfFaction and selfFaction or nil })
-		end
-		for i = 1, GetNumPartyMembers(), 1 do
-			local unit = "party" .. i
-			if UnitExists(unit) then
-				local name = UnitName(unit)
-				local okClass, class = pcall(UnitClass, unit)
-				local okFaction, faction = pcall(UnitFactionGroup, unit)
-				if name and okClass then
-					table.insert(roster, { name = name, class = class, faction = okFaction and faction or nil })
-				end
-			end
-		end
-	end
+	-- Reuses the shared 1s-cached roster (see RBS_GetCachedRoster above) instead of its own
+	-- UnitExists/UnitName/UnitClass/UnitFactionGroup pass every tick -- runs on the same ~1s cadence
+	-- as RBS_ScanCDBuffs (both are called back-to-back from RBS_CDFrameOnUpdate), so they now share
+	-- one roster walk instead of each doing their own.
+	local roster = RBS_GetCachedRoster()
 
 	-- Experimental talent-gate scan (2026-09-02, per the user) -- no-ops entirely unless the toggle
 	-- is on. Piggybacks on the roster this function already builds every tick instead of scanning it
@@ -2963,19 +3032,14 @@ function RBS_OnLoad()
 			end
 			return
 		end
-		-- "/rbs cdtest" -- the Cooldowns frame has no visible backdrop/title at all anymore (matching
-		-- Holyward's own borderless look), so when it's empty there's genuinely NOTHING to see, which
-		-- makes it impossible to tell "detection isn't working" apart from "I don't even know where
-		-- this window is on my screen". This forces one fake 30-second entry so the window is
-		-- guaranteed to render, independent of whether real detection works at all -- it defaults to
-		-- the middle of the screen, slightly above center (RBS_CreateCDFrame's own default position).
+		-- "/rbs cdtest" REMOVED (2026-09-07): confirmed dead since the Cooldowns tracker's static
+		-- roster-based rewrite -- it injected RBS_CDState["INNERVATE|TestDruid"], but a row only ever
+		-- renders for a REAL raid/party member matched by class, and "TestDruid" is nobody's real
+		-- name, so this silently produced no visible row at all despite claiming it would. "/rbs
+		-- overload" (below) is the real, working replacement -- redirect anyone with old muscle
+		-- memory there instead of quietly doing nothing.
 		if msg == "cdtest" then
-			RaidBuffStatusConfig.CDEnabled = true
-			RBS_CDState["INNERVATE|TestDruid"] = GetTime() + 30
-			DEFAULT_CHAT_FRAME:AddMessage(
-				"|cFF00CCFFRaidBuffStatus:|r Injected a fake 30s Innervate cooldown -- look near the "
-					.. "middle of your screen, slightly above center. Drag it to reposition."
-			)
+			DEFAULT_CHAT_FRAME:AddMessage("|cFF00CCFFRaidBuffStatus:|r \"cdtest\" is gone -- try \"/rbs overload\" instead.")
 			return
 		end
 		-- "/rbs overload" (2026-09-03, per the user): fills the Cooldowns window with 25 synthetic
@@ -3046,7 +3110,7 @@ function RBS_OnLoad()
 			return
 		end
 		-- "/rbs talentdump <name>" (2026-09-02, per the user: some CD-tracker abilities -- Ascendance,
-		-- Bloodlust, Spirit Link Totem -- are talent-gated on this server, not baseline class
+		-- Bloodlust, Spirit Link -- are talent-gated on this server, not baseline class
 		-- abilities, so class membership alone isn't enough to say someone can provide them).
 		-- WoW has no API to read another player's talents without inspecting them first --
 		-- NotifyInspect(unit) requests it (must be in inspect range, ~30 yards), and

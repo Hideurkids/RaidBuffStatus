@@ -12,16 +12,6 @@
 -- options window as this client allows.
 ------------------------------------------------------------------------------------------------------
 
--- Unconditional load canary (2026-08-27): the game reported "attempt to call global
--- `RaidBuffStatus_ShowOptions' (a nil value)" when the slash command tried to call it, which means
--- this ENTIRE FILE never executed -- that function is defined unconditionally at this file's top
--- level, so if it's nil, nothing in this file ran at all (not a bug inside one of its functions).
--- This print runs the instant the file is parsed, before anything else in it, to give a direct,
--- unambiguous answer at /reload time instead of only finding out indirectly when /rbs options fails
--- much later: if "RaidBuffStatusOptions.lua loaded" never appears in chat, this file (and likely the
--- whole Libs\ folder it depends on) simply is not present in the live AddOns install.
-DEFAULT_CHAT_FRAME:AddMessage("|cFF00CCFFRaidBuffStatus:|r RaidBuffStatusOptions.lua loaded.")
-
 local APP_NAME = "RaidBuffStatus"
 
 local RaidBuffStatusOptions = {
@@ -456,7 +446,7 @@ local function CreateCooldownsTab()
 		talentScan = {
 			type = "toggle", order = 3.5, width = "full",
 			name = "Hide talent-gated rows for people without the talent",
-			desc = "Ascendance, Bloodlust, Heroism and Spirit Link Totem are talent picks on this server, not baseline class abilities -- not every Priest/Shaman has them. When on, this inspects Priests/Shamans in your raid/party (one at a time, only while in range, cached per-person for the session) and hides that person's row for one of these four abilities if they're confirmed NOT to have the talent. Experimental: relies on the Inspect API and a name-match against their talent list, and a row stays visible until the scan actually confirms they lack it.",
+			desc = "Ascendance, Bloodlust, Heroism and Spirit Link are talent picks on this server, not baseline class abilities -- not every Priest/Shaman has them. When on, this inspects Priests/Shamans in your raid/party (one at a time, only while in range, cached per-person for the session) and hides that person's row for one of these four abilities if they're confirmed NOT to have the talent. Experimental: relies on the Inspect API and a name-match against their talent list, and a row stays visible until the scan actually confirms they lack it.",
 			get = function()
 				return RaidBuffStatusConfig.TalentScanEnabled
 			end,
