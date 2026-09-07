@@ -77,7 +77,7 @@ end
 -- actually running, without having to ask the user to check -- also flags whether a stale/second
 -- copy of this addon (e.g. a leftover install of the old reference folder reusing the same global
 -- names) might be clobbering these functions after this file loads.
-RBS_BUILD = "v98-radar-options-selectgroup"
+RBS_BUILD = "v101-soulstone-cd-row"
 
 -- CONFIRMED via real raid testing (2026-08-31): right after a disconnect/reconnect (server kick,
 -- zone in, etc.), C_UnitAuras.GetAuraDataByIndex can return NOTHING for a window of several
@@ -323,9 +323,20 @@ end
 
 -- Returns: holders (names currently carrying an active Soulstone), warlocks (one entry per raid/
 -- party Warlock: { name = ..., remaining = secondsLeftOnCooldown (0 if available) }).
+-- PERFORMANCE (2026-09-10, per the user's optimization request, same class of fix as the roster
+-- cache above): used to allocate fresh `holders`/`warlocks` arrays, PLUS a fresh `{ name=,
+-- remaining= }` record per Warlock, on every call -- this runs every dashboard tick (2s) AND every
+-- Soulstone tooltip hover, forever. Both arrays are now persistent (reused across calls); `holders`
+-- only ever stores plain name STRINGS (no per-element record needed), `warlocks`' existing record
+-- tables are reused by position the same way RBS_AddRosterPerson reuses roster records. Both are
+-- trimmed to the real count at the end so table.getn stays accurate for callers.
+local RBS_SoulstoneHolders = {}
+local RBS_SoulstoneWarlocks = {}
 local function RBS_ScanSoulstone()
-	local holders = {}
-	local warlocks = {}
+	local holders = RBS_SoulstoneHolders
+	local warlocks = RBS_SoulstoneWarlocks
+	local holderCount = 0
+	local warlockCount = 0
 
 	-- Reuses the shared 1s-cached roster (see RBS_GetCachedRoster, a plain global defined further
 	-- down this file, same cross-section pattern used throughout) instead of its own UnitExists/
@@ -346,7 +357,14 @@ local function RBS_ScanSoulstone()
 					remaining = 0
 				end
 			end
-			table.insert(warlocks, { name = name, remaining = remaining })
+			warlockCount = warlockCount + 1
+			local record = warlocks[warlockCount]
+			if not record then
+				record = {}
+				warlocks[warlockCount] = record
+			end
+			record.name = name
+			record.remaining = remaining
 		end
 
 		local hasIt = false
@@ -366,7 +384,8 @@ local function RBS_ScanSoulstone()
 		end
 
 		if hasIt then
-			table.insert(holders, name)
+			holderCount = holderCount + 1
+			holders[holderCount] = name
 		end
 
 		-- Transition detection: only start a cooldown if this is a NEW appearance since last scan.
@@ -377,6 +396,13 @@ local function RBS_ScanSoulstone()
 			end
 		end
 		RBS_SoulstoneHadIt[name] = hasIt
+	end
+
+	while table.getn(holders) > holderCount do
+		table.remove(holders)
+	end
+	while table.getn(warlocks) > warlockCount do
+		table.remove(warlocks)
 	end
 
 	return holders, warlocks
@@ -455,6 +481,10 @@ local function RBS_BuffIcon_OnEnter()
 				local w = warlocks[i]
 				if w.remaining > 0 then
 					local mins = math.floor(w.remaining / 60)
+					-- REVERTED (2026-09-10, per the user): this tooltip's own "Has Soulstone:" section
+					-- above already names who currently carries one -- showing the target again here
+					-- too was redundant. The "CasterName > TargetName" treatment belongs only on the
+					-- separate Cooldowns tracker's own Soulstone row (RBS_CD_LIST) instead.
 					GameTooltip:AddLine(w.name .. " -- ~" .. mins .. "m (approx.)", 1, 0.3, 0.3)
 				else
 					GameTooltip:AddLine(w.name .. " -- available", 0.3, 1, 0.3)
@@ -876,58 +906,95 @@ end
 -- stale is never a correctness problem here -- someone joining/leaving mid-second is picked up on
 -- the very next refresh, same as before this change (every consumer was already only ever as fresh
 -- as its own last ~1s tick).
-RBS_RosterCache = nil
+RBS_RosterCache = {}
 RBS_RosterCacheTime = 0
 local RBS_ROSTER_CACHE_TTL = 1
 
+-- Precomputed unit tokens (2026-09-10, per the user's optimization request): avoids "raid"..i /
+-- "party"..i string concatenation for every member, every single rebuild (once a second) -- same
+-- reasoning as the rest of RBS_GetCachedRoster's own reuse-in-place rewrite below. Raid caps at 40,
+-- party at 4 (the real client limits); either loop falls back to a plain concat if somehow asked
+-- to go past that, so nothing breaks if those limits ever change.
+local RBS_RAID_UNIT_TOKENS = {}
+local RBS_PARTY_UNIT_TOKENS = {}
+for i = 1, 40, 1 do
+	RBS_RAID_UNIT_TOKENS[i] = "raid" .. i
+end
+for i = 1, 4, 1 do
+	RBS_PARTY_UNIT_TOKENS[i] = "party" .. i
+end
+
+-- Adds `unit` as the next roster entry if it exists, reusing `roster[count+1]`'s existing record
+-- table (fields overwritten in place) instead of allocating a new one -- returns the new count
+-- (unchanged if `unit` doesn't exist). A plain GLOBAL, not local: RBS_GetCachedRoster below is
+-- defined right after this and would be fine referencing a local here, but every other
+-- cross-section helper in this file already uses a global for this exact class of situation, and
+-- this one has no need to ever be file-private.
+function RBS_AddRosterPerson(roster, count, unit)
+	if not UnitExists(unit) then
+		return count
+	end
+	count = count + 1
+	local person = roster[count]
+	if not person then
+		person = {}
+		roster[count] = person
+	end
+	-- Include the unit as long as it EXISTS, regardless of whether class/faction resolved --
+	-- matches RBS_ScanBuff's own original leniency (a unit that exists but whose class briefly
+	-- fails to resolve should still count for buff-missing/death-tracking purposes, just not
+	-- match any class-gated check). `name` falls back to the raw unit token, never nil, same as
+	-- RBS_ScanBuff's own prior `UnitName(unit) or unit`.
+	local okClass, class, classToken = pcall(UnitClass, unit)
+	local okFaction, faction = pcall(UnitFactionGroup, unit)
+	person.unit = unit
+	person.name = UnitName(unit) or unit
+	-- UnitClass returns TWO values: a localized display name ("Rogue") and an uppercase,
+	-- locale-independent token ("ROGUE") -- `class` (the localized one) is what every existing
+	-- class== comparison in this file already relies on (RBS_CD_LIST/RBS_BUFF_LIST entries are
+	-- all written as "Rogue"/"Warrior"/etc, matching that same convention), so it stays as-is.
+	-- `classToken` is ADDITIONALLY captured (2026-09-09, real report: the radar showed a Rogue
+	-- as white/gray, not class-colored) because Blizzard's own RAID_CLASS_COLORS table is keyed
+	-- by the uppercase token specifically -- indexing it with the localized name instead always
+	-- silently misses.
+	person.class = okClass and class or nil
+	person.classToken = okClass and classToken or nil
+	person.faction = okFaction and faction or nil
+	return count
+end
+
+-- PERFORMANCE (2026-09-10, per the user's optimization request, following the same class of fix
+-- just applied to Holyward): used to allocate a brand new `roster` table AND a brand new
+-- `{ unit=, name=, ... }` record table per member, via table.insert, on EVERY rebuild -- once a
+-- real second, forever, for up to 40 raid members. RBS_RosterCache is now a PERSISTENT table (never
+-- reassigned to a fresh {}) -- existing per-member record tables are reused BY POSITION (their
+-- fields overwritten in place via RBS_AddRosterPerson above) instead of thrown away and recreated,
+-- so a rebuild that finds the same roster size as last time allocates nothing at all. Any leftover
+-- records past the new count are trimmed so table.getn(roster) stays accurate for every consumer.
 function RBS_GetCachedRoster()
 	local now = GetTime()
-	if RBS_RosterCache and (now - RBS_RosterCacheTime) < RBS_ROSTER_CACHE_TTL then
+	if (now - RBS_RosterCacheTime) < RBS_ROSTER_CACHE_TTL then
 		return RBS_RosterCache
 	end
 
-	local roster = {}
-	local function addUnit(unit)
-		if not UnitExists(unit) then
-			return
-		end
-		-- Include the unit as long as it EXISTS, regardless of whether class/faction resolved --
-		-- matches RBS_ScanBuff's own original leniency (a unit that exists but whose class briefly
-		-- fails to resolve should still count for buff-missing/death-tracking purposes, just not
-		-- match any class-gated check). `name` falls back to the raw unit token, never nil, same as
-		-- RBS_ScanBuff's own prior `UnitName(unit) or unit`.
-		local name = UnitName(unit) or unit
-		-- UnitClass returns TWO values: a localized display name ("Rogue") and an uppercase,
-		-- locale-independent token ("ROGUE") -- `class` (the localized one) is what every existing
-		-- class== comparison in this file already relies on (RBS_CD_LIST/RBS_BUFF_LIST entries are
-		-- all written as "Rogue"/"Warrior"/etc, matching that same convention), so it stays as-is.
-		-- `classToken` is ADDITIONALLY captured (2026-09-09, real report: the radar showed a Rogue
-		-- as white/gray, not class-colored) because Blizzard's own RAID_CLASS_COLORS table is keyed
-		-- by the uppercase token specifically -- indexing it with the localized name instead always
-		-- silently misses.
-		local okClass, class, classToken = pcall(UnitClass, unit)
-		local okFaction, faction = pcall(UnitFactionGroup, unit)
-		table.insert(roster, {
-			unit = unit,
-			name = name,
-			class = okClass and class or nil,
-			classToken = okClass and classToken or nil,
-			faction = okFaction and faction or nil,
-		})
-	end
+	local roster = RBS_RosterCache
+	local count = 0
 
 	if GetNumRaidMembers() > 0 then
 		for i = 1, GetNumRaidMembers(), 1 do
-			addUnit("raid" .. i)
+			count = RBS_AddRosterPerson(roster, count, RBS_RAID_UNIT_TOKENS[i] or ("raid" .. i))
 		end
 	else
-		addUnit("player")
+		count = RBS_AddRosterPerson(roster, count, "player")
 		for i = 1, GetNumPartyMembers(), 1 do
-			addUnit("party" .. i)
+			count = RBS_AddRosterPerson(roster, count, RBS_PARTY_UNIT_TOKENS[i] or ("party" .. i))
 		end
 	end
 
-	RBS_RosterCache = roster
+	while table.getn(roster) > count do
+		table.remove(roster)
+	end
+
 	RBS_RosterCacheTime = now
 	return roster
 end
@@ -951,8 +1018,17 @@ end
 -- (btn.rbsCount:SetText), it never needs the individual missing/provider names the way an
 -- on-demand RBS_ScanBuff call does, so this also skips building any per-buff `missing`/`providers`
 -- array or calling UnitClass at all, saving those allocations too.
+-- PERFORMANCE (2026-09-10, per the user's optimization request, same class of fix as the roster
+-- cache above): `counts` used to be allocated fresh every call, PLUS a fresh `matched` table per
+-- roster member (up to 40) every single call -- this runs every 2 seconds, forever. `counts`' key
+-- set never changes (always RBS_BUFF_LIST's own ids), so it's zeroed in place below instead of
+-- recreated; `matched` is now ONE persistent table reused across every person in the same call,
+-- cleared between people (a cheap `pairs` walk over its own handful of existing keys, not a fresh
+-- allocation) instead of thrown away and recreated 40 times a call.
+local RBS_ScanAllBuffCountsResult = {}
+local RBS_ScanAllBuffMatchedScratch = {}
 local function RBS_ScanAllBuffCounts()
-	local counts = {}
+	local counts = RBS_ScanAllBuffCountsResult
 	for b = 1, table.getn(RBS_BUFF_LIST), 1 do
 		local def = RBS_BUFF_LIST[b]
 		if def.special ~= "soulstone" then
@@ -964,9 +1040,12 @@ local function RBS_ScanAllBuffCounts()
 	-- UnitExists/UnitName/UnitClass/UnitFactionGroup pass -- this scan only ever needed the unit
 	-- token anyway, so it was doing strictly more work than necessary even before the cache existed.
 	local roster = RBS_GetCachedRoster()
+	local matched = RBS_ScanAllBuffMatchedScratch
 	for p = 1, table.getn(roster), 1 do
 		local unit = roster[p].unit
-		local matched = {}
+		for k in pairs(matched) do
+			matched[k] = nil
+		end
 		local index = 1
 		while true do
 			local ok, aura = pcall(C_UnitAuras.GetAuraDataByIndex, unit, index, "HELPFUL")
@@ -1545,13 +1624,23 @@ end
 -- or (Vanish specifically) leave one ("Stealth") that's indistinguishable from an unrelated, far
 -- more common ability (plain Stealth) -- see VANISH's own comment below.
 RBS_CD_LIST = {
+	-- Also tracked here (2026-09-10, per the user) as its own normal CD_LIST row -- separate from,
+	-- and in ADDITION to, the main dashboard's own dedicated Soulstone icon+tooltip further up this
+	-- file (RBS_ScanSoulstone / RBS_BUFF_LIST's special="soulstone" entry), which stays untouched --
+	-- that one already names who currently carries a stone, so adding the same info there too would
+	-- be redundant; this row is specifically for the separate Cooldowns tracker window. Uses the
+	-- same generic buffName-based detection as Innervate right below -- the buff appears on the
+	-- RECIPIENT, so the target is already exactly known with no extra detection work. Distinct id
+	-- from RBS_BUFF_LIST's own "SOULSTONE" entry (different list, different state tables -- no real
+	-- collision either way, but kept distinct for anyone grepping/debugging later).
+	{ id = "SOULSTONE_CD", label = "Soulstone", icon = "Interface\\Icons\\INV_Misc_Orb_04", class = "Warlock", spellName = "Soulstone Resurrection", buffName = "Soulstone Resurrection", cooldown = 30 * 60, showsTarget = true },
 	-- Confirmed vanilla spell name + icon; 6 min is vanilla's real base cooldown.
-	{ id = "INNERVATE",  label = "Innervate",         icon = "Interface\\Icons\\Spell_Nature_Lightning",     class = "Druid",  spellName = "Innervate",         buffName = "Innervate",         cooldown = 6 * 60 },
+	{ id = "INNERVATE",  label = "Innervate",         icon = "Interface\\Icons\\Spell_Nature_Lightning",     class = "Druid",  spellName = "Innervate",         buffName = "Innervate",         cooldown = 6 * 60, showsTarget = true },
 	-- UNCONFIRMED: vanilla Rebirth has no real spell cooldown, only a reagent requirement -- a
 	-- distinct timed "Battle Rez" is likely a TWoW/OctoWoW-specific talent/spell change. spellName
 	-- and cooldown here are placeholders pending an in-game tooltip check. No buffName -- a
 	-- resurrection doesn't leave a clean aura to scan for on either the caster or the target.
-	{ id = "BATTLEREZ",  label = "Battle Rez",        icon = "Interface\\Icons\\Spell_Nature_Reincarnation", class = "Druid",  spellName = "Rebirth",           cooldown = 30 * 60 },
+	{ id = "BATTLEREZ",  label = "Battle Rez",        icon = "Interface\\Icons\\Spell_Nature_Reincarnation", class = "Druid",  spellName = "Rebirth",           cooldown = 30 * 60, showsTarget = true },
 	-- Bloodlust (Horde) / Heroism (Alliance, a TWoW cross-faction addition) share the same icon in
 	-- every era of Blizzard's own data.
 	-- talentGated = true (2026-09-02, CONFIRMED by the user): Bloodlust/Heroism/Spirit Link
@@ -1609,13 +1698,13 @@ RBS_CD_LIST = {
 	{ id = "BERSERKERRAGE",     label = "Berserker Rage",        icon = "Interface\\Icons\\Spell_Nature_AncestralGuardian", class = "Warrior", spellName = "Berserker Rage",        buffName = "Berserker Rage", selfOnly = true, cooldown = 30 },
 	{ id = "PUMMEL",            label = "Pummel",                icon = "Interface\\Icons\\INV_Gauntlets_04",               class = "Warrior", spellName = "Pummel",                cooldown = 10 },
 	{ id = "DISARM",            label = "Disarm",                icon = "Interface\\Icons\\Ability_Warrior_Disarm",         class = "Warrior", spellName = "Disarm",                cooldown = 60 },
-	{ id = "LAYONHANDS",        label = "Lay on Hands",          icon = "Interface\\Icons\\Spell_Holy_LayOnHands",          class = "Paladin", spellName = "Lay on Hands",          cooldown = 60 * 60 },
-	{ id = "BOP",               label = "Blessing of Protection",icon = "Interface\\Icons\\Spell_Holy_SealOfProtection",    class = "Paladin", spellName = "Blessing of Protection",buffName = "Blessing of Protection", cooldown = 5 * 60 },
+	{ id = "LAYONHANDS",        label = "Lay on Hands",          icon = "Interface\\Icons\\Spell_Holy_LayOnHands",          class = "Paladin", spellName = "Lay on Hands",          cooldown = 60 * 60, showsTarget = true },
+	{ id = "BOP",               label = "Blessing of Protection",icon = "Interface\\Icons\\Spell_Holy_SealOfProtection",    class = "Paladin", spellName = "Blessing of Protection",buffName = "Blessing of Protection", cooldown = 5 * 60, showsTarget = true },
 	-- Icon paths for these two (Divine Shield -> the "DivineIntervention" texture, Divine
 	-- Intervention -> the "TimeStop" texture) -- an odd-looking swap, but cross-checked against a
 	-- working, server-specific reference rather than "corrected" from memory.
 	{ id = "DIVINESHIELD",      label = "Divine Shield",         icon = "Interface\\Icons\\Spell_Holy_DivineIntervention",  class = "Paladin", spellName = "Divine Shield",         buffName = "Divine Shield", selfOnly = true, cooldown = 5 * 60 },
-	{ id = "DIVINEINTERVENTION",label = "Divine Intervention",   icon = "Interface\\Icons\\Spell_Nature_TimeStop",          class = "Paladin", spellName = "Divine Intervention",   cooldown = 60 * 60 },
+	{ id = "DIVINEINTERVENTION",label = "Divine Intervention",   icon = "Interface\\Icons\\Spell_Nature_TimeStop",          class = "Paladin", spellName = "Divine Intervention",   cooldown = 60 * 60, showsTarget = true },
 	{ id = "CHALLENGINGROAR",   label = "Challenging Roar",      icon = "Interface\\Icons\\Ability_Druid_ChallangingRoar",  class = "Druid",   spellName = "Challenging Roar",      cooldown = 10 * 60 },
 	-- Added 2026-09-03, per the user. Icon confirmed via the bundled name->icon table
 	-- (RaidBuffStatusSpellIcons.lua, "Spell_Nature_Tranquility"), and RBS_ResolveCDIcon will also try
@@ -1730,6 +1819,13 @@ end
 -- ["ID|CasterName"] = GetTime() value the cooldown ends. Global for the same cross-function-
 -- visibility reason as RBS_BuffIcons/RBS_HeaderBuilt above.
 RBS_CDState = {}
+-- ["ID|CasterName"] = the name of whoever the ability was cast ON, for the handful of CD_LIST
+-- entries with `showsTarget = true` (2026-09-10, per the user: "que incluya el nombre a quien se le
+-- tiro"). Session-only, deliberately NOT persisted to SavedVariables like RBS_CDState/CDSaved above
+-- -- losing the target label across a reload while a cooldown happens to be mid-count is an
+-- acceptable, minor loss (the countdown itself still survives via CDSaved), not worth the extra
+-- persisted-format complexity for a purely cosmetic detail.
+RBS_CDTarget = {}
 RBS_CDRows = {}
 RBS_CDNeedsBuild = false
 -- "/rbs overload" (2026-09-03, per the user: a way to visually test the row-limit/column-wrap
@@ -1843,10 +1939,14 @@ end
 -- still on cooldown). RBS_OnAddonLoaded converts CDSaved back into a fresh RBS_CDState entry for the
 -- new session on login/reload; RBS_UpdateCooldowns clears BOTH tables together once a cooldown
 -- actually expires.
-function RBS_SetCDReady(key, cooldownSeconds)
+-- `targetName` (2026-09-10, per the user) is optional -- only ever passed for a CD_LIST entry with
+-- `showsTarget = true`, nil for every other ability. Stored in RBS_CDTarget (see its own comment
+-- above for why that's session-only, unlike the two fields below).
+function RBS_SetCDReady(key, cooldownSeconds, targetName)
 	RBS_CDState[key] = GetTime() + cooldownSeconds
 	RaidBuffStatusConfig.CDSaved = RaidBuffStatusConfig.CDSaved or {}
 	RaidBuffStatusConfig.CDSaved[key] = time() + cooldownSeconds
+	RBS_CDTarget[key] = targetName
 end
 
 -- Global, NOT local (2026-08-30): RBS_OnEvent, which calls this, is defined EARLIER in this file --
@@ -1903,7 +2003,12 @@ function RBS_OnCombatLogCooldowns()
 		-- entry, which just falls back to the name-only match.
 		if track[def.id] and (arg10 == def.spellName or (def.spellId and arg9 == def.spellId)) then
 			if RBS_GroupMemberClass(arg4) == def.class then
-				RBS_SetCDReady(def.id .. "|" .. arg4, def.cooldown)
+				-- arg7 = destName (2026-09-10, per the user) -- the combat log's own documented
+				-- layout already hands this over as a plain string, no GUID resolution needed at
+				-- all here (see RBS_OnUnitCastEvent's own comment for why this only applies to
+				-- showsTarget entries).
+				local targetName = def.showsTarget and arg7 or nil
+				RBS_SetCDReady(def.id .. "|" .. arg4, def.cooldown, targetName)
 			end
 			break
 		end
@@ -1996,7 +2101,16 @@ function RBS_OnUnitCastEvent()
 		if track[def.id] and (spellName == def.spellName or (def.spellId and arg4 == def.spellId)) then
 			local casterName = RBS_NameFromGuid(arg1)
 			if casterName and RBS_GroupMemberClass(casterName) == def.class then
-				RBS_SetCDReady(def.id .. "|" .. casterName, def.cooldown)
+				-- arg2 = targetGuid (2026-09-10, per the user) -- resolved the same way as the
+				-- caster above, via arg1. Only meaningful for the entries the user actually asked
+				-- for (Battle Rez/Lay on Hands/Divine Intervention, all `showsTarget = true`, no
+				-- `buffName` -- unlike Innervate/Blessing of Protection, which get their target from
+				-- the aura scan instead, see RBS_ScanCDCheckUnit). RBS_NameFromGuid only resolves a
+				-- RAID/PARTY member, which is exactly what these three always target -- deliberately
+				-- NOT used for the mob-targeted abilities (Kick, Tranquilizing Shot, etc.) the user
+				-- explicitly asked to skip, since a mob's GUID would never resolve here anyway.
+				local targetName = def.showsTarget and RBS_NameFromGuid(arg2) or nil
+				RBS_SetCDReady(def.id .. "|" .. casterName, def.cooldown, targetName)
 			end
 			break
 		end
@@ -2027,9 +2141,88 @@ local function RBS_CDTipCaster(unit, index)
 	return nil
 end
 
--- [unit .. "|" .. abilityId] = true/false, this unit's last-seen state for that ability's buff.
--- Global for the same cross-function-visibility reason as RBS_SoulstoneHadIt/RBS_BuffIcons above.
+-- [unit][abilityId] = true/false, this unit's last-seen state for that ability's buff -- nested by
+-- unit then ability id (2026-09-10, per the user's optimization request), NOT a single table keyed
+-- by a concatenated "unit" .. "|" .. abilityId STRING like before: that concatenation allocated a
+-- new string on every single (unit, tracked-ability) pair, every second (up to roster-size *
+-- tracked-count of these a tick) -- a plain nested table index needs no string at all. Purely
+-- in-memory session state (never saved), so restructuring it has no migration concern. Global for
+-- the same cross-function-visibility reason as RBS_SoulstoneHadIt/RBS_BuffIcons above.
 RBS_CDBuffHadIt = {}
+
+-- Persistent scratch state for RBS_ScanCDBuffs/RBS_ScanCDCheckUnit below (2026-09-10, per the
+-- user's optimization request, same class of fix as the roster cache above): `trackedDefs` used to
+-- be allocated fresh every call (once a second); `foundIndex` used to be allocated fresh PER ROSTER
+-- MEMBER (up to 40) every single call -- the bigger of the two. Both are now reused in place.
+local RBS_ScanCDTrackedDefs = {}
+local RBS_ScanCDFoundIndex = {}
+
+-- Extracted out to a plain top-level function (2026-09-10) so it's defined ONCE for the life of the
+-- file instead of as a closure recreated every single RBS_ScanCDBuffs call (once a second) --
+-- trackedDefs/trackedCount are now explicit parameters instead of captured upvalues.
+local function RBS_ScanCDCheckUnit(trackedDefs, trackedCount, unit, name)
+	if trackedCount == 0 then
+		return
+	end
+
+	-- ONE aura-list walk for this unit, recording which tracked buffs matched (and at which index,
+	-- needed later for the "Cast by:" tooltip lookup on a non-selfOnly entry). Reused across every
+	-- unit in this tick -- cleared here (a cheap walk over its own handful of existing keys) instead
+	-- of reallocated per unit.
+	local foundIndex = RBS_ScanCDFoundIndex
+	for k in pairs(foundIndex) do
+		foundIndex[k] = nil
+	end
+	local index = 1
+	while true do
+		local ok, aura = pcall(C_UnitAuras.GetAuraDataByIndex, unit, index, "HELPFUL")
+		if not ok or not aura then
+			break
+		end
+		if aura.name then
+			for d = 1, trackedCount, 1 do
+				local def = trackedDefs[d]
+				if not foundIndex[def.id] and aura.name == def.buffName then
+					foundIndex[def.id] = index
+				end
+			end
+		end
+		index = index + 1
+	end
+
+	local byUnit = RBS_CDBuffHadIt[unit]
+	if not byUnit then
+		byUnit = {}
+		RBS_CDBuffHadIt[unit] = byUnit
+	end
+
+	for d = 1, trackedCount, 1 do
+		local def = trackedDefs[d]
+		local castByIndex = foundIndex[def.id]
+		local hasIt = castByIndex ~= nil
+
+		if hasIt and byUnit[def.id] == false then
+			local caster = name
+			if not def.selfOnly then
+				local okCaster, tipCaster = pcall(RBS_CDTipCaster, unit, castByIndex)
+				if okCaster and tipCaster and tipCaster ~= "" then
+					caster = tipCaster
+				else
+					caster = nil
+				end
+			end
+			if caster then
+				-- `name` here IS the target -- literally the unit whose aura list this buff was
+				-- just found on (2026-09-10, per the user) -- already exactly known, no extra
+				-- detection needed, unlike the mob-targeted abilities the user explicitly asked to
+				-- skip. Never applies to a selfOnly entry (caster == name == the same person there).
+				local targetName = (def.showsTarget and not def.selfOnly) and name or nil
+				RBS_SetCDReady(def.id .. "|" .. caster, def.cooldown, targetName)
+			end
+		end
+		byUnit[def.id] = hasIt
+	end
+end
 
 -- Generalizes the Soulstone transition-detection technique (see that section's own comment) to any
 -- RBS_CD_LIST entry that has a `buffName`. Walks the raid/party roster once, and for each tracked
@@ -2054,7 +2247,7 @@ function RBS_ScanCDBuffs()
 	local track = RaidBuffStatusConfig.CDTrack or {}
 
 	-- Computed once per call, not once per unit: which CD_LIST entries actually need scanning.
-	local trackedDefs = {}
+	local trackedDefs = RBS_ScanCDTrackedDefs
 	local trackedCount = 0
 	for i = 1, table.getn(RBS_CD_LIST), 1 do
 		local def = RBS_CD_LIST[i]
@@ -2063,54 +2256,8 @@ function RBS_ScanCDBuffs()
 			trackedDefs[trackedCount] = def
 		end
 	end
-
-	local function checkUnit(unit, name)
-		if trackedCount == 0 then
-			return
-		end
-
-		-- ONE aura-list walk for this unit, recording which tracked buffs matched (and at which
-		-- index, needed later for the "Cast by:" tooltip lookup on a non-selfOnly entry).
-		local foundIndex = {}
-		local index = 1
-		while true do
-			local ok, aura = pcall(C_UnitAuras.GetAuraDataByIndex, unit, index, "HELPFUL")
-			if not ok or not aura then
-				break
-			end
-			if aura.name then
-				for d = 1, trackedCount, 1 do
-					local def = trackedDefs[d]
-					if not foundIndex[def.id] and aura.name == def.buffName then
-						foundIndex[def.id] = index
-					end
-				end
-			end
-			index = index + 1
-		end
-
-		for d = 1, trackedCount, 1 do
-			local def = trackedDefs[d]
-			local castByIndex = foundIndex[def.id]
-			local hasIt = castByIndex ~= nil
-
-			local stateKey = unit .. "|" .. def.id
-			if hasIt and RBS_CDBuffHadIt[stateKey] == false then
-				local caster = name
-				if not def.selfOnly then
-					local okCaster, tipCaster = pcall(RBS_CDTipCaster, unit, castByIndex)
-					if okCaster and tipCaster and tipCaster ~= "" then
-						caster = tipCaster
-					else
-						caster = nil
-					end
-				end
-				if caster then
-					RBS_SetCDReady(def.id .. "|" .. caster, def.cooldown)
-				end
-			end
-			RBS_CDBuffHadIt[stateKey] = hasIt
-		end
+	while table.getn(trackedDefs) > trackedCount do
+		table.remove(trackedDefs)
 	end
 
 	-- Reuses the shared 1s-cached roster (see RBS_GetCachedRoster above) instead of its own
@@ -2118,7 +2265,7 @@ function RBS_ScanCDBuffs()
 	-- (both are called back-to-back from RBS_CDFrameOnUpdate), so they now share one roster walk.
 	local roster = RBS_GetCachedRoster()
 	for p = 1, table.getn(roster), 1 do
-		checkUnit(roster[p].unit, roster[p].name)
+		RBS_ScanCDCheckUnit(trackedDefs, trackedCount, roster[p].unit, roster[p].name)
 	end
 end
 
@@ -2350,7 +2497,7 @@ end
 -- Renders/positions one CD row (1-based `activeRows` slot) given a def + caster name + remaining
 -- time. Extracted (2026-09-03) so "/rbs overload"'s synthetic fill below can share the exact same
 -- rendering/column-wrap math as the real roster loop instead of duplicating it.
-local function RBS_RenderCDRow(activeRows, def, casterName, remaining, iconSize, rowLimit)
+local function RBS_RenderCDRow(activeRows, def, casterName, remaining, iconSize, rowLimit, targetName)
 	local row = RBS_CDRows[activeRows]
 	if not row then
 		return
@@ -2362,6 +2509,7 @@ local function RBS_RenderCDRow(activeRows, def, casterName, remaining, iconSize,
 	row.rbsAbilityId = def.id
 	row.rbsCaster = casterName
 	row.rbsRemaining = remaining
+	row.rbsTarget = targetName
 
 	-- PERFORMANCE (2026-09-04, per the user's high-CPU/memory report): skip re-applying icon/text/
 	-- bar/color when NOTHING about this row actually changed since last tick. A "Ready" row's
@@ -2374,13 +2522,20 @@ local function RBS_RenderCDRow(activeRows, def, casterName, remaining, iconSize,
 	local unchanged = row.rbsLastAbilityId == def.id
 		and row.rbsLastCasterName == casterName
 		and row.rbsLastReady == ready
+		and row.rbsLastTarget == targetName
 		and (ready or row.rbsLastRemainingInt == remainingInt)
 
 	if not unchanged then
 		row.icon:SetTexture(RBS_ResolveCDIcon(def))
-		-- Name only (2026-08-31, per the user): the icon already identifies the ability, no need to
-		-- spell it out again in the label too.
-		row.text:SetText(casterName)
+		-- Name only (2026-08-31, per the user), UNLESS this entry tracks who it was cast on
+		-- (2026-09-10, per the user: "Hideurkids > Nydeh") -- only while actually on cooldown, since
+		-- once it's Ready again there's no "current" target left to show, just whoever it was LAST
+		-- used on, which reads as stale/wrong.
+		if targetName and remaining > 0 then
+			row.text:SetText(casterName .. " > " .. targetName)
+		else
+			row.text:SetText(casterName)
+		end
 
 		if remaining > 0 then
 			-- Progress bar drains from full to empty over the cooldown -- MinMax is the full
@@ -2404,6 +2559,7 @@ local function RBS_RenderCDRow(activeRows, def, casterName, remaining, iconSize,
 		row.rbsLastCasterName = casterName
 		row.rbsLastReady = ready
 		row.rbsLastRemainingInt = remainingInt
+		row.rbsLastTarget = targetName
 	end
 
 	-- Column wrapping (2026-09-03, per the user: a row limit, then wrap into a new column to the
@@ -2460,6 +2616,7 @@ local function RBS_UpdateCooldowns()
 			if RaidBuffStatusConfig.CDSaved then
 				RaidBuffStatusConfig.CDSaved[key] = nil
 			end
+			RBS_CDTarget[key] = nil
 		end
 	end
 
@@ -2493,7 +2650,11 @@ local function RBS_UpdateCooldowns()
 				remaining = 30 + i * 7
 			end
 			activeRows = activeRows + 1
-			RBS_RenderCDRow(activeRows, def, "TestPlayer" .. i, remaining, iconSize, rowLimit)
+			-- Exercises the "CasterName > TargetName" display too (2026-09-10) for any def that
+			-- actually shows one, so this test command doubles as a way to check that rendering
+			-- without needing a real Innervate/Battle Rez/etc. cast.
+			local fakeTarget = def.showsTarget and ("TestTarget" .. i) or nil
+			RBS_RenderCDRow(activeRows, def, "TestPlayer" .. i, remaining, iconSize, rowLimit, fakeTarget)
 		end
 	else
 		for a = 1, table.getn(RBS_CD_LIST), 1 do
@@ -2512,12 +2673,13 @@ local function RBS_UpdateCooldowns()
 					local factionBlocked = def.faction and person.faction and person.faction ~= def.faction
 					if person.class == def.class and not talentBlocked and not factionBlocked and activeRows < RBS_CD_MAX_ROWS then
 						activeRows = activeRows + 1
-						local readyAt = RBS_CDState[def.id .. "|" .. person.name]
+						local stateKey = def.id .. "|" .. person.name
+						local readyAt = RBS_CDState[stateKey]
 						local remaining = 0
 						if readyAt then
 							remaining = readyAt - now
 						end
-						RBS_RenderCDRow(activeRows, def, person.name, remaining, iconSize, rowLimit)
+						RBS_RenderCDRow(activeRows, def, person.name, remaining, iconSize, rowLimit, RBS_CDTarget[stateKey])
 					end
 				end
 			end

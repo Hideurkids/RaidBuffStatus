@@ -105,14 +105,16 @@ A separate floating window (icon + a real progress bar, no boxed panel) listing,
 tracked ability, every raid/party member of the matching class — **without** requiring anyone
 else in your raid to run this addon. Each row is a permanent "who has this" entry showing either
 "Ready" (green) or a red countdown, so the list stays static instead of icons popping in and out
-as cooldowns start and end.
+as cooldowns start and end. For abilities cast on someone else (Soulstone, Innervate, Battle Rez,
+Lay on Hands, Blessing of Protection, Divine Intervention), the row shows who it was cast on too
+("Hideurkids > Nydeh") for as long as it's on cooldown.
 
 <!-- Screenshot: the Cooldowns window with a row limit set, wrapped into multiple columns -->
 ![Cooldowns tracker](./screenshots/cooldowns.png)
 
-Currently tracks: Innervate, Battle Rez, Bloodlust, Heroism, Spirit Link, Ascendance, Lightwell,
-Tranquility, Shield Wall, Challenging Shout, Berserker Rage, Pummel, Disarm, Lay on Hands,
-Blessing of Protection, Divine Shield, Divine Intervention, Challenging Roar,
+Currently tracks: Soulstone, Innervate, Battle Rez, Bloodlust, Heroism, Spirit Link, Ascendance,
+Lightwell, Tranquility, Shield Wall, Challenging Shout, Berserker Rage, Pummel, Disarm, Lay on
+Hands, Blessing of Protection, Divine Shield, Divine Intervention, Challenging Roar,
 Reincarnation, Tranquilizing Shot, Kick, Vanish, and Evasion — each individually toggleable in
 Options → Cooldowns (turning off abilities you don't care about keeps the list shorter). Bloodlust
 and Heroism are gated to the caster's actual faction, so a single Shaman never shows both.
