@@ -146,9 +146,32 @@ A few things are still expected to be rough around the edges:
 - The talent-gate scan requires SuperWoW's Inspect range and one scan per person, so a row may
   stay visible for a short while after someone joins even if they don't have the talent.
 
+### Radar *(EXPERIMENTAL, off by default)*
+A small floating window showing every raid/party member as a colored dot (tinted by class)
+relative to you, rotating so the direction you're currently facing is always up. Needs SuperWoW's
+`UnitPosition` — without it, the window stays empty.
+
+<!-- Screenshot: the radar window showing its background circle and player marker -->
+![Radar](./screenshots/radar.png)
+
+Off on every login/reload, regardless of how you left it last session:
+
+- **`/range <yards>`** opens the radar at that range; bare **`/range`** closes it again.
+- Options → Radar also has an **Enabled** toggle, plus **Range**, **Window size**, and
+  **Reset position** — this one just doesn't persist across a reload the way the rest of the
+  addon's settings do.
+- Right-click anywhere on the radar to jump straight to its Options tab.
+- Drag anywhere on it to reposition.
+
+The background's own drawn circle marks the configured range boundary; anyone up to 5 extra yards
+past that (outside the circle, still inside the window) also shows, so you can see who's
+approaching the edge before they actually enter range. Hover a dot for a tooltip with that
+person's name and live distance in yards. The label under the window shows the configured range
+and how many people are currently within it.
+
 ### Settings window
 A full AceConfig-based options dialog with the same dark theme used across this client's
-addons, split into General, RaidAssist, Healers, Tanks, and Cooldowns tabs.
+addons, split into General, RaidAssist, Healers, Tanks, Cooldowns, and Radar tabs.
 
 <!-- Screenshot: settings window -->
 ![Settings](./screenshots/options.png)
@@ -180,6 +203,7 @@ addons, split into General, RaidAssist, Healers, Tanks, and Cooldowns tabs.
   target) has, straight to chat, for troubleshooting buff detection.
 - **`/rbs talentdump <name>`** — inspects a given raid/party member and dumps every talent they
   have at least one point in, straight to chat.
+- **`/range <yards>`** — opens the radar at that range; bare **`/range`** closes it again.
 - Drag the title bar to move the main window; drag the bottom-left grip to resize it. The
   Cooldowns window is dragged the same way, from anywhere on it.
 
