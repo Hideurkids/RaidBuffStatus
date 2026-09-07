@@ -58,7 +58,7 @@ own content (so a short last row doesn't look left-aligned).
 Posts the status of every buff that at least one person is missing (buffs everyone has are
 skipped) to raid chat, or party chat if you're not in a raid:
 ```
-Missing Fortitude: Nydeh | Missing Flask: Nydeh, Danlyr, Siurufa
+Missing Fortitude: Nydeh - Missing Flask: Nydeh, Danlyr, Siurufa
 ```
 Packs as many buffs as fit into a single 250-character message before starting a new one, instead
 of one message per buff -- a buff missing from many people spills onto a continuation line rather

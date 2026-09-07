@@ -233,9 +233,22 @@ local function CreateGeneralTab()
 					RaidBuffStatusConfig.Enabled = value
 					if value then
 						RaidBuffStatusFrame:Show()
+						RBS_ApplyDashboardCombatVisibility()
 					else
 						RaidBuffStatusFrame:Hide()
 					end
+				end,
+			},
+			hideInCombat = {
+				type = "toggle", order = 1.5, width = "full",
+				name = "Hide in combat",
+				desc = "Hides the buff tracker's icons while you're in combat, and shows them again once combat ends. Death warnings and Salvation removal keep working the whole time either way -- this only affects the icons' own visibility.",
+				get = function()
+					return RaidBuffStatusConfig.HideInCombat
+				end,
+				set = function(info, value)
+					RaidBuffStatusConfig.HideInCombat = value
+					RBS_ApplyDashboardCombatVisibility()
 				end,
 			},
 			iconSize = {
@@ -486,6 +499,64 @@ local function CreateCooldownsTab()
 	}
 end
 
+-- Experimental (2026-09-08, per the user). See RaidBuffStatus.lua's own RADAR section for the full
+-- design/scope notes.
+local function CreateRadarTab()
+	return {
+		name = "Radar",
+		type = "group",
+		args = {
+			header = {
+				type = "header", order = 1,
+				name = "Experimental",
+			},
+			enabled = {
+				type = "toggle", order = 2, width = "full",
+				name = "Enabled",
+				desc = "Shows every raid/party member's position relative to you as colored dots, rotating so the direction you're facing is always up. Requires SuperWoW (for UnitPosition) -- without it, the radar stays empty. Scoped to your own raid/party only, never enemies or other units.",
+				get = function()
+					return RaidBuffStatusConfig.RadarEnabled
+				end,
+				set = function(info, value)
+					RBS_ApplyRadarEnabled(value)
+				end,
+			},
+			range = {
+				type = "range", order = 3, width = "full",
+				name = "Range (yards)",
+				desc = "How far out the radar's own drawn circle reaches. Anyone up to 5 extra yards beyond this also shows, outside that circle but still inside the window, so you can see who's approaching the edge.",
+				min = 5, max = 100, step = 5,
+				get = function()
+					return RaidBuffStatusConfig.RadarRange or 60
+				end,
+				set = function(info, value)
+					RaidBuffStatusConfig.RadarRange = value
+				end,
+			},
+			size = {
+				type = "range", order = 4, width = "full",
+				name = "Window size",
+				desc = "Pixel size of the radar window.",
+				min = 60, max = 300, step = 10,
+				get = function()
+					return RaidBuffStatusConfig.RadarSize or 180
+				end,
+				set = function(info, value)
+					RBS_ApplyRadarSize(value)
+				end,
+			},
+			resetPosition = {
+				type = "execute", order = 5, width = "full",
+				name = "Reset position",
+				desc = "Puts the radar window back at its default position -- for if it's been dragged off-screen or somewhere inconvenient.",
+				func = function()
+					RBS_ResetRadarPosition()
+				end,
+			},
+		},
+	}
+end
+
 local function CreateOptionsTable()
 	return {
 		name = "RaidBuffStatus Options",
@@ -497,6 +568,7 @@ local function CreateOptionsTable()
 			healers_tab = CreateHealersTab(),
 			tanks_tab = CreateTanksTab(),
 			cooldowns_tab = CreateCooldownsTab(),
+			radar_tab = CreateRadarTab(),
 		},
 	}
 end
@@ -601,6 +673,29 @@ function RaidBuffStatus_ShowOptions()
 	end
 	local Dialog = LibStub("RBS-AceConfigDialog-3.0")
 	Dialog:Open(APP_NAME, RaidBuffStatusOptions.configFrame)
+	RecenterConfigFrame(RaidBuffStatusOptions.configFrame)
+	if RaidBuffStatusOptions.configFrame.SetStatusText then
+		RaidBuffStatusOptions.configFrame:SetStatusText(nil)
+	end
+	RaidBuffStatus_ApplyOptionsDarkTheme()
+end
+
+-- Right-click on the radar opens straight to its own tab (2026-09-10, per the user) -- the exact
+-- same window "/rbs config" opens (full tab strip, every tab still there), just with Radar already
+-- selected instead of whichever tab was open last.
+-- FIXED (2026-09-10, real report: "la ventana no deberia ser diferente"): passing "radar_tab" as an
+-- extra arg to Open() -- what an earlier version of this did -- is NOT the same thing as selecting a
+-- tab. Open() treats extra args as a base PATH and drills straight into that subgroup's own content,
+-- rendering it standalone without the outer tab strip at all (a totally different, smaller window).
+-- SelectGroup(), called AFTER a normal Open() with no extra args, is the actual "switch the active
+-- tab" operation -- same window, same strip, Radar just starts selected.
+function RaidBuffStatus_ShowRadarOptions()
+	if not RaidBuffStatusOptions_Initialize() then
+		return
+	end
+	local Dialog = LibStub("RBS-AceConfigDialog-3.0")
+	Dialog:Open(APP_NAME, RaidBuffStatusOptions.configFrame)
+	Dialog:SelectGroup(APP_NAME, "radar_tab")
 	RecenterConfigFrame(RaidBuffStatusOptions.configFrame)
 	if RaidBuffStatusOptions.configFrame.SetStatusText then
 		RaidBuffStatusOptions.configFrame:SetStatusText(nil)

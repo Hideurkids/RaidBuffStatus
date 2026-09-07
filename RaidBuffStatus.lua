@@ -38,11 +38,22 @@ RaidBuffStatusConfig.FightStartMissesDuration = RaidBuffStatusConfig.FightStartM
 -- Ported from Holyward (2026-09-02, per the user): "cast whatever's under the mouse instead of
 -- your target" for every action bar. See the HEALER UTILITIES section below for the actual hook.
 RaidBuffStatusConfig.MouseoverCast = RaidBuffStatusConfig.MouseoverCast or false
+-- Per the user (2026-09-10): hides the buff tracker's icons while in combat, shows them again once
+-- combat ends -- see RBS_ApplyDashboardCombatVisibility for why this uses SetAlpha, not Hide/Show.
+RaidBuffStatusConfig.HideInCombat = RaidBuffStatusConfig.HideInCombat or false
 -- Experimental (2026-09-02, per the user): see the TALENT SCAN section below.
 RaidBuffStatusConfig.TalentScanEnabled = RaidBuffStatusConfig.TalentScanEnabled or false
 -- Cooldowns column-wrap row limit (2026-09-03, per the user): 0 means "Sin limite" (one column,
 -- unlimited height) -- see RBS_UpdateCooldowns for where this is actually used.
 RaidBuffStatusConfig.CDRowLimit = RaidBuffStatusConfig.CDRowLimit or 0
+-- Experimental (2026-09-08, per the user: "el radar visual es sumamente importante"). Needs
+-- SuperWoW's UnitPosition -- see the RADAR section below. Off by default, same as every other
+-- experimental toggle in this file.
+RaidBuffStatusConfig.RadarEnabled = RaidBuffStatusConfig.RadarEnabled or false
+-- Range in yards the radar's outer edge represents.
+RaidBuffStatusConfig.RadarRange = RaidBuffStatusConfig.RadarRange or 60
+-- Pixel size (width and height) of the radar window.
+RaidBuffStatusConfig.RadarSize = RaidBuffStatusConfig.RadarSize or 180
 
 -- Persisted debug trace (2026-08-31): every RBS_XXXDebug print (CD debug, Soulstone debug, taunt
 -- debug, /rbs auradump) ALSO goes here, not just to chat -- this table lives inside
@@ -66,7 +77,7 @@ end
 -- actually running, without having to ask the user to check -- also flags whether a stale/second
 -- copy of this addon (e.g. a leftover install of the old reference folder reusing the same global
 -- names) might be clobbering these functions after this file loads.
-RBS_BUILD = "v78-announce-cont-no-prefix"
+RBS_BUILD = "v98-radar-options-selectgroup"
 
 -- CONFIRMED via real raid testing (2026-08-31): right after a disconnect/reconnect (server kick,
 -- zone in, etc.), C_UnitAuras.GetAuraDataByIndex can return NOTHING for a window of several
@@ -557,7 +568,12 @@ local function RBS_PositionIcons()
 			local rowWidth = iconsThisRow * RBS_ICON_SIZE + (iconsThisRow - 1) * RBS_ICON_GAP
 			local startX = (frameWidth - rowWidth) / 2
 
-			btn:ClearAllPoints()
+			-- No ClearAllPoints() (2026-09-10, optimization pass) -- btn only ever gets ONE point,
+			-- always "TOPLEFT" relative to RaidBuffStatusFrame's own "TOPLEFT", anywhere in this
+			-- file -- SetPoint below just moves it. This function runs on EVERY frame while the
+			-- resize grip is being dragged (unthrottled OnUpdate), across every buff icon, so the
+			-- redundant clear was real per-frame waste during exactly the moment stutter would be
+			-- most noticeable.
 			btn:SetPoint(
 				"TOPLEFT", RaidBuffStatusFrame, "TOPLEFT",
 				startX + col * (RBS_ICON_SIZE + RBS_ICON_GAP),
@@ -755,9 +771,16 @@ end
 -- PACKING (2026-09-08, per the user): rather than one chat message per buff (RBS_ANNOUNCE_MAX_NAMES
 -- names max, "Too many!" past that), every buff's own segment(s) (RBS_BuildAnnounceSegments, already
 -- 250-char-safe on their own) get combined -- as many WHOLE segments as fit -- into shared messages
--- separated by " | ", instead of wasting a whole message on a buff missing from just one or two
+-- separated by " - ", instead of wasting a whole message on a buff missing from just one or two
 -- people. This also means fewer total messages sent for the same information, which helps avoid
 -- tripping the client's/server's chat flood protection on a raid missing several buffs at once.
+--
+-- FIXED (2026-09-09, real report): originally used " | " as the separator -- WoW's own chat system
+-- treats a bare "|" as the start of a color/hyperlink escape code (|cFFRRGGBB, |r, |Hitem:...|h,
+-- etc), and pfUI's macrotweak module validates outgoing chat text against that same escape-code
+-- grammar -- "| " (pipe followed by a space, not a recognized escape letter) isn't a valid one, so
+-- it threw "Invalid escape code in chat message" the instant a combined announce needed more than
+-- one buff's segment in the same line. "-" has no special meaning in that grammar at all.
 local function RBS_AnnounceMissing()
 	-- See RBS_ScanSuppressUntil's own comment (top of file) -- refuse to announce at all right after
 	-- a reconnect, rather than blasting the whole raid with a false "everyone is missing everything"
@@ -780,7 +803,7 @@ local function RBS_AnnounceMissing()
 			if combined == "" then
 				candidate = seg
 			else
-				candidate = combined .. " | " .. seg
+				candidate = combined .. " - " .. seg
 			end
 			if string.len(candidate) <= RBS_CHAT_MSG_MAX_LEN then
 				combined = candidate
@@ -874,12 +897,21 @@ function RBS_GetCachedRoster()
 		-- match any class-gated check). `name` falls back to the raw unit token, never nil, same as
 		-- RBS_ScanBuff's own prior `UnitName(unit) or unit`.
 		local name = UnitName(unit) or unit
-		local okClass, class = pcall(UnitClass, unit)
+		-- UnitClass returns TWO values: a localized display name ("Rogue") and an uppercase,
+		-- locale-independent token ("ROGUE") -- `class` (the localized one) is what every existing
+		-- class== comparison in this file already relies on (RBS_CD_LIST/RBS_BUFF_LIST entries are
+		-- all written as "Rogue"/"Warrior"/etc, matching that same convention), so it stays as-is.
+		-- `classToken` is ADDITIONALLY captured (2026-09-09, real report: the radar showed a Rogue
+		-- as white/gray, not class-colored) because Blizzard's own RAID_CLASS_COLORS table is keyed
+		-- by the uppercase token specifically -- indexing it with the localized name instead always
+		-- silently misses.
+		local okClass, class, classToken = pcall(UnitClass, unit)
 		local okFaction, faction = pcall(UnitFactionGroup, unit)
 		table.insert(roster, {
 			unit = unit,
 			name = name,
 			class = okClass and class or nil,
+			classToken = okClass and classToken or nil,
 			faction = okFaction and faction or nil,
 		})
 	end
@@ -1202,6 +1234,9 @@ function RBS_OnEvent()
 		if RaidBuffStatusConfig.FightStartMisses then
 			RBS_FightStartWindowUntil = GetTime() + (RaidBuffStatusConfig.FightStartMissesDuration or 8)
 		end
+		RBS_ApplyDashboardCombatVisibility()
+	elseif event == "PLAYER_REGEN_ENABLED" then
+		RBS_ApplyDashboardCombatVisibility()
 	elseif event == "CHAT_MSG_COMBAT_SELF_MISSES" then
 		RBS_OnCombatSelfMiss()
 	elseif event == "UNIT_CASTEVENT" then
@@ -2381,7 +2416,10 @@ local function RBS_RenderCDRow(activeRows, def, casterName, remaining, iconSize,
 		rowInCol = math.mod(rowIndex0, rowLimit)
 	end
 
-	row:ClearAllPoints()
+	-- No ClearAllPoints() (2026-09-10, optimization pass) -- this row only ever gets ONE point,
+	-- always "TOPLEFT" relative to RaidBuffStatusCDFrame's own "TOPLEFT", anywhere in this file --
+	-- SetPoint below just moves that same point to a new offset, clearing first was wasted work on
+	-- every active row, every second.
 	row:SetPoint(
 		"TOPLEFT", RaidBuffStatusCDFrame, "TOPLEFT",
 		col * (RBS_CDRowWidth(iconSize) + RBS_CD_COL_GAP),
@@ -2586,6 +2624,530 @@ function RBS_ResetCDPosition()
 	RaidBuffStatusCDFrame:SetPoint("CENTER", UIParent, "CENTER", 0, 80)
 end
 
+------------------------------------------------------------------------------------------------------
+-- RADAR (experimental, 2026-09-08, per the user: "el radar visual es sumamente importante"). Shows
+-- every raid/party member's position relative to the local player as colored dots on a north-up
+-- top-down panel -- deliberately SCOPED to your own raid/party only, not enemies or any other unit,
+-- matching this addon's own raid-coordination purpose (this is not, and should never become, an
+-- ESP-style tool).
+--
+-- Requires SuperWoW's UnitPosition(unit) -- confirmed real via a working reference addon already on
+-- this machine (pfUI's own api.lua, pfUI.api.UnitDistance): it returns world x/y/z for ANY unit, not
+-- just yourself, which is exactly what a radar needs. Gated on RBS_HasSuperWoW (defined earlier in
+-- this file for the Cooldowns tracker's own UNIT_CASTEVENT detection) plus a direct `UnitPosition`
+-- existence check.
+--
+-- FACING-ROTATED (2026-09-09, per the user: real in-game screenshot showed Nydeh to their LEFT in
+-- the world but plotted on the RADAR's RIGHT -- confirms the original north-up mapping's east/west
+-- sign was backwards on this client's UnitPosition, and the user separately asked for the radar to
+-- rotate with the player instead of staying north-up). Both fixed together below: "forward" (however
+-- you're currently facing) is always screen-up, and left/right are now empirically correct, not
+-- assumed.
+--
+-- WoW's world coordinate convention: +X = north, +Y-axis is the east/west axis (the ORIGINAL
+-- assumption that +Y = west specifically is what the real screenshot disproved -- kept as a plain
+-- axis, not asserting the compass direction, since only the empirical sign matters here).
+-- GetPlayerFacing() returns radians in that same world frame (0 = facing world +X/north), used the
+-- same way this client's own default minimap rotation code uses it (a standard 2D rotation, sin/cos
+-- of the facing angle directly, confirmed via a real working reference on this machine). Per-target
+-- world delta (dx, dy) is projected onto the player's own forward/right axes:
+--   forward = dx*cos(facing) + dy*sin(facing)   -> screenY (forward is always up)
+--   right   = dy*cos(facing) - dx*sin(facing)   -> screenX (right is always right)
+-- The `right` term's sign is the empirically-corrected one (flipped from the original derivation).
+-- 90-DEGREE ROTATION BUG (2026-09-09, confirmed via 3 independent real in-game reports, not a
+-- guess this time): target directly AHEAD showed on the radar's RIGHT; target directly LEFT showed
+-- at the TOP (forward); target directly BEHIND showed on the LEFT. That is a perfectly consistent
+-- 90-degree-clockwise rotation of the whole output (ahead->right->behind->left->ahead is exactly
+-- the clockwise cycle), which means `forward`/`right` above were being computed correctly as
+-- player-relative projections, just assigned to the WRONG screen axes. Fix (in RBS_UpdateRadar):
+-- the actual screen point is screenX = -forward, screenY = right (a 90-degree counter-clockwise
+-- correction) -- NOT screenX = right, screenY = forward as the two variable names would suggest.
+-- Verified algebraically against all 3 reports before shipping (each maps exactly).
+--
+-- Dots are a small synthesized circular texture (RBS_RADAR_DOT_TEXTURE below), tinted via
+-- SetVertexColor. Colored by class via Blizzard's own RAID_CLASS_COLORS table (shipped with the
+-- default UI, not this addon's own data) -- note RAID_CLASS_COLORS is keyed by the uppercase class
+-- TOKEN ("ROGUE"), not the localized display name ("Rogue") every other class== check in this file
+-- uses, so the lookup goes through `person.classToken`, not `person.class` (see RBS_GetCachedRoster
+-- above for where that second field comes from).
+------------------------------------------------------------------------------------------------------
+
+-- A custom round dot texture was tried twice and rendered as nothing at all both times, even after
+-- fixing the "AddOns" vs "Addons" path-case bug that turned out to be the real cause of a SEPARATE
+-- background-texture failure (see RBS_RADAR_BG_TEXTURE's own comment) -- never re-confirmed working
+-- after that fix (may well work now too, just not re-attempted), so this stays the proven WHITE8X8
+-- square in the meantime.
+local RBS_RADAR_DOT_TEXTURE = "Interface\\Buttons\\WHITE8X8"
+local RBS_RADAR_MAX_DOTS = 40
+local RBS_RadarDots = {}
+local RBS_RadarNeedsBuild = true
+local RBS_RadarLastCheck = 0
+-- Change-detection for the range/count label's own SetText (2026-09-10, optimization pass) -- see
+-- RBS_UpdateRadar's own comment near where these are used.
+local RBS_RadarLastLabelRange = nil
+local RBS_RadarLastLabelCount = nil
+-- Lowered from 0.2s (2026-09-09, per the user: "que el movimiento de los cuadrados del radar sea
+-- mas fluido") -- 20 updates/sec instead of 5. Still throttled, not truly unthrottled OnUpdate --
+-- same "don't hammer a native call every single frame" reasoning as UnitXP elsewhere in this
+-- project's own notes, just a lighter throttle since this only walks the roster (already 1-second
+-- cached) plus one UnitPosition pcall per visible dot, not per raid member.
+local RBS_RADAR_TICK_INTERVAL = 0.05
+
+-- The background's drawn circle doesn't fill its full square image, so the scale math below can't
+-- just assume "range = frame edge". Fraction measured directly off the source PNG's alpha channel
+-- (scan each row's opaque-pixel width, find the widest row = the circle's own diameter at its
+-- vertical center) -- not eyeballed: "Radar simple.png" is a near-full circle, first/last opaque
+-- row 50/1185 of 1254, widest row's width 1135 -> radius 567.5 of a 627 half-width -> fraction
+-- 0.905. Roughly centered (no off-center art), so no Y-offset correction is needed anywhere below.
+local RBS_RADAR_CIRCLE_FRACTION = 0.905
+-- Shows this many yards beyond the configured range (2026-09-09, per the user: "para ver quien esta
+-- en el borde del rango") -- dots in that margin land outside the drawn circle but still inside the
+-- square frame (RBS_UpdateRadar's own hard clamp guarantees the "still inside the square" part
+-- regardless of how small the configured range is).
+local RBS_RADAR_EXTRA_YARDS = 5
+
+-- Dot/marker size now scales WITH the window size (2026-09-09, per the user: shrinking the radar
+-- left the dots the same fixed 7x7/9x9 pixels, so a small radar ended up with oversized squares).
+-- Fractions are just "what fraction of the default 180px frame the old fixed sizes were".
+-- RBS_RADAR_DOT_MIN_SIZE floors it so a very small radar doesn't shrink dots into literal nothing
+-- (still hoverable for the tooltip at that point).
+local RBS_RADAR_DOT_SIZE_FRACTION = 7 / 180
+local RBS_RADAR_CENTER_SIZE_FRACTION = 9 / 180
+local RBS_RADAR_DOT_MIN_SIZE = 3
+
+-- Plain global (not local) for the same reason as RBS_RadarCenterMarker above: called both from
+-- code earlier in this file (RBS_BuildOneRadarDot, right below) and later (RBS_ApplyRadarSize).
+function RBS_RadarScaledSize(fraction)
+	local size = RaidBuffStatusConfig.RadarSize or 180
+	local s = size * fraction
+	if s < RBS_RADAR_DOT_MIN_SIZE then
+		s = RBS_RADAR_DOT_MIN_SIZE
+	end
+	return s
+end
+
+-- Resizes every already-built dot plus the center marker to match the current RadarSize -- called
+-- once from RBS_ApplyRadarSize (live resize via the Options slider). Newly-built dots size
+-- themselves correctly from the start via RBS_BuildOneRadarDot below, so this only needs to touch
+-- dots that already existed before the resize.
+function RBS_ApplyRadarDotScale()
+	local dotSize = RBS_RadarScaledSize(RBS_RADAR_DOT_SIZE_FRACTION)
+	for i = 1, RBS_RADAR_MAX_DOTS, 1 do
+		if RBS_RadarDots[i] then
+			RBS_RadarDots[i]:SetWidth(dotSize)
+			RBS_RadarDots[i]:SetHeight(dotSize)
+		end
+	end
+	if RBS_RadarCenterMarker then
+		local centerSize = RBS_RadarScaledSize(RBS_RADAR_CENTER_SIZE_FRACTION)
+		RBS_RadarCenterMarker:SetWidth(centerSize)
+		RBS_RadarCenterMarker:SetHeight(centerSize)
+	end
+end
+
+-- Hover tooltip (2026-09-09, per the user) -- name + live distance in yards. Dots need to be real
+-- mouse-interactive widgets for this (a plain Texture, what these were before, has no SetScript/
+-- EnableMouse at all on this client) -- see RBS_BuildOneRadarDot below for the Button+child-texture
+-- rework this required. `this.rbsName`/`this.rbsDist` are refreshed every RBS_UpdateRadar tick, same
+-- zero-args SetScript convention as every other OnEnter/OnLeave handler in this file (read `this`,
+-- don't declare parameters). Declared here, BEFORE RBS_BuildOneRadarDot, since that function
+-- references them directly and a `local` referenced by code defined earlier in the file resolves as
+-- nil on this client (the standing Lua-5.0.2 upvalue-ordering gotcha) -- being plain locals is fine
+-- as long as the declaration order itself is respected.
+local function RBS_RadarDot_OnEnter()
+	if not this.rbsName then
+		return
+	end
+	GameTooltip:SetOwner(this, "ANCHOR_RIGHT")
+	GameTooltip:AddLine(this.rbsName, 1, 1, 1)
+	GameTooltip:AddLine(string.format("%.0f yards", this.rbsDist or 0), 0.7, 0.7, 0.7)
+	GameTooltip:Show()
+end
+
+local function RBS_RadarDot_OnLeave()
+	GameTooltip:Hide()
+end
+
+local function RBS_BuildOneRadarDot(i)
+	local dot = CreateFrame("Button", nil, RaidBuffStatusRadarFrame)
+	local dotSize = RBS_RadarScaledSize(RBS_RADAR_DOT_SIZE_FRACTION)
+	dot:SetWidth(dotSize)
+	dot:SetHeight(dotSize)
+	dot:EnableMouse(true)
+	dot:SetScript("OnEnter", RBS_RadarDot_OnEnter)
+	dot:SetScript("OnLeave", RBS_RadarDot_OnLeave)
+	local tex = dot:CreateTexture(nil, "OVERLAY")
+	tex:SetTexture(RBS_RADAR_DOT_TEXTURE)
+	tex:SetAllPoints(dot)
+	dot.rbsTexture = tex
+	dot:Hide()
+	RBS_RadarDots[i] = dot
+end
+
+-- Deferred the same way every other pooled-widget builder in this file is (RBS_BuildHeader,
+-- RBS_BuildCDRows) -- building this synchronously during OnLoad hits the same confirmed
+-- table-write-doesn't-persist bug documented there. Built on the radar frame's own first OnUpdate
+-- tick instead.
+local function RBS_BuildRadarDots()
+	for i = 1, RBS_RADAR_MAX_DOTS, 1 do
+		local ok, err = pcall(RBS_BuildOneRadarDot, i)
+		if not ok then
+			DEFAULT_CHAT_FRAME:AddMessage(
+				"|cFF00CCFFRaidBuffStatus:|r |cFFFF0000error building radar dot " .. i .. ":|r " .. tostring(err)
+			)
+		end
+	end
+end
+
+-- Called from the Options window's Radar toggle.
+-- FIXED (2026-09-09, real report: "a veces cuando el juego se recarga el radar no aparece a pesar
+-- de estar activo") -- this used to Show()/Hide() the FRAME ITSELF here, which is the exact same
+-- bug class RBS_CreateCDFrame's own comment already documented and fixed for the Cooldowns tracker:
+-- OnUpdate never fires on a hidden frame, so a frame hidden at one point has no way to "notice" a
+-- later config change and show itself again except through some OTHER code path explicitly calling
+-- Show() -- normally the Options toggle here, which is fine for a live UI click, but NOT for what
+-- actually happens on login/reload. RBS_CreateRadarFrame() runs during this addon's own file
+-- execution (its XML frame's OnLoad), which is BEFORE the engine reassigns RaidBuffStatusConfig
+-- from the SavedVariables file and fires ADDON_LOADED (see RBS_OnAddonLoaded's own comment for the
+-- full timing) -- so the frame's very first Show()/Hide() decision, made back at creation time, was
+-- reading a config value that hadn't been replaced with the real saved one yet. Once that stale
+-- decision hid the frame, nothing ever re-showed it, even after the real (enabled) value arrived
+-- moments later, because a hidden frame's OnUpdate never runs to check again.
+-- Fix: never hide the frame itself at all (same as the CD frame) -- RaidBuffStatusRadarFrame stays
+-- shown forever after creation, so its OnUpdate keeps ticking regardless of config timing, and
+-- RBS_RadarFrameOnUpdate re-checks RadarEnabled on every single tick (see RBS_SetRadarContentVisible
+-- below) instead of only once. This function now only ever needs to update the config value itself
+-- -- the next tick (within RBS_RADAR_TICK_INTERVAL, currently 0.05s) picks it up on its own.
+function RBS_ApplyRadarEnabled(enabled)
+	RaidBuffStatusConfig.RadarEnabled = enabled
+	if enabled and not (RBS_HasSuperWoW and UnitPosition) then
+		DEFAULT_CHAT_FRAME:AddMessage(
+			"|cFF00CCFFRaidBuffStatus:|r Radar needs SuperWoW (for UnitPosition) -- it isn't detected on this client, so the radar will stay empty."
+		)
+	end
+end
+
+-- Applies a new size/range live (Options sliders) without needing a /reload -- resizes the frame
+-- itself; the next RBS_UpdateRadar tick picks up the new range/scale on its own since both are read
+-- fresh from RaidBuffStatusConfig every tick, not cached.
+function RBS_ApplyRadarSize(newSize)
+	RaidBuffStatusConfig.RadarSize = newSize
+	if RaidBuffStatusRadarFrame then
+		RaidBuffStatusRadarFrame:SetWidth(newSize)
+		RaidBuffStatusRadarFrame:SetHeight(newSize)
+	end
+	RBS_ApplyRadarDotScale()
+end
+
+function RBS_UpdateRadar()
+	if not (RBS_HasSuperWoW and UnitPosition) then
+		return
+	end
+
+	local okSelf, px, py = pcall(UnitPosition, "player")
+	if not okSelf or not px or not py then
+		return
+	end
+	local okFacing, facing = pcall(GetPlayerFacing)
+	if not okFacing or not facing then
+		facing = 0
+	end
+	local cosF = math.cos(facing)
+	-- ROTATION DIRECTION FLIPPED (2026-09-09, per the user: "No muestra bien donde esta" across
+	-- turns, after the earlier static left/right fix at facing~=0 was already confirmed correct).
+	-- Negating just the sin term is equivalent to using -facing everywhere below, which reverses
+	-- the direction the radar spins as the player turns while leaving facing=0 (already verified)
+	-- untouched (sin(0) = 0 either way). If this overshoots (rotates the right amount but now the
+	-- wrong way from before), this is the one line to flip back.
+	local sinF = -math.sin(facing)
+
+	local roster = RBS_GetCachedRoster()
+	local range = RaidBuffStatusConfig.RadarRange or 60
+	local size = RaidBuffStatusConfig.RadarSize or 180
+
+	-- See RBS_RADAR_CIRCLE_FRACTION's own comment -- the drawn circle doesn't fill the whole square,
+	-- so `range` yards must map to the CIRCLE's edge, not the frame's.
+	local scale = (size / 2 * RBS_RADAR_CIRCLE_FRACTION) / range
+	local effectiveRange = range + RBS_RADAR_EXTRA_YARDS
+	local playerName = UnitName("player")
+
+	local shown = 0
+	-- Counts only dist <= range (the CONFIGURED range), not effectiveRange -- the indicator label
+	-- reports "who's actually within the range you set", not the bonus edge-preview margin
+	-- (RBS_RADAR_EXTRA_YARDS).
+	local inRangeCount = 0
+	for r = 1, table.getn(roster), 1 do
+		local person = roster[r]
+		if person.name ~= playerName and shown < RBS_RADAR_MAX_DOTS then
+			local okUnit, ux, uy = pcall(UnitPosition, person.unit)
+			if okUnit and ux and uy then
+				local dx = ux - px
+				local dy = uy - py
+				local dist = math.sqrt(dx * dx + dy * dy)
+				if dist <= effectiveRange then
+					shown = shown + 1
+					if dist <= range then
+						inRangeCount = inRangeCount + 1
+					end
+					local dot = RBS_RadarDots[shown]
+					if dot then
+						local color = person.classToken and RAID_CLASS_COLORS and RAID_CLASS_COLORS[person.classToken]
+						if color then
+							dot.rbsTexture:SetVertexColor(color.r, color.g, color.b, 1)
+						else
+							dot.rbsTexture:SetVertexColor(1, 1, 1, 1)
+						end
+						dot.rbsName = person.name
+						dot.rbsDist = dist
+						-- No ClearAllPoints() (2026-09-10, optimization pass) -- this dot only ever gets
+						-- ONE point, "CENTER", set anywhere in this file (never anchored at creation,
+						-- never any other anchor type) -- SetPoint below just moves that same point,
+						-- clearing first was pure wasted work on every visible dot, every tick (up to 40
+						-- dots at 20 ticks/sec).
+						-- See this section's own header comment for the coordinate mapping. `forward`/
+						-- `right` here are the raw player-relative projections; the actual screen
+						-- point is a further 90-degree rotation of those (see the header comment for
+						-- why) -- screenX = -forward, screenY = right.
+						local forward = dx * cosF + dy * sinF
+						local right = dy * cosF - dx * sinF
+						local screenX = -forward * scale
+						local screenY = right * scale
+						-- Hard clamp (2026-09-09, per the user: "nunca nadie deberia salir del
+						-- recuadro negro") -- never let a dot's SCREEN position exceed the frame's
+						-- own half-width, no matter what the scale math above works out to. This
+						-- matters specifically because of the extra-yards margin
+						-- (RBS_RADAR_EXTRA_YARDS): at a small configured range (the slider allows as
+						-- low as 5 yards), a fixed +5-yard margin is a LARGE fraction of the range,
+						-- and the unclamped math could place a margin dot past the square frame's
+						-- actual edge. This clamp is a hard backstop independent of that math, not a
+						-- replacement for it.
+						local screenDist = math.sqrt(screenX * screenX + screenY * screenY)
+						local maxScreenDist = size / 2
+						if screenDist > maxScreenDist then
+							local clampScale = maxScreenDist / screenDist
+							screenX = screenX * clampScale
+							screenY = screenY * clampScale
+						end
+						dot:SetPoint("CENTER", RaidBuffStatusRadarFrame, "CENTER", screenX, screenY)
+						dot:Show()
+					end
+				end
+			end
+		end
+	end
+
+	for i = shown + 1, RBS_RADAR_MAX_DOTS, 1 do
+		if RBS_RadarDots[i] then
+			RBS_RadarDots[i]:Hide()
+		end
+	end
+
+	-- Range/count indicator (2026-09-09, per the user, "Custom range indicator"-style: configured
+	-- range plus how many are actually within it right now) -- a plain global, not local: this
+	-- function is defined earlier in the file than RBS_CreateRadarFrame (which creates the
+	-- FontString), and a `local` here would resolve as nil at this earlier point (the standing
+	-- Lua-5.0.2 upvalue-ordering gotcha documented in this project's own notes).
+	-- Skip SetText (and the string concatenation to build it) when neither value actually changed
+	-- since the last tick (2026-09-10, optimization pass) -- both cost real work (SetText triggers a
+	-- font-string re-layout, not just a data write) for no visible difference on the vast majority of
+	-- ticks, where nobody crossed the range boundary between one 0.05s tick and the next.
+	if RBS_RadarRangeLabel and (range ~= RBS_RadarLastLabelRange or inRangeCount ~= RBS_RadarLastLabelCount) then
+		RBS_RadarLastLabelRange = range
+		RBS_RadarLastLabelCount = inRangeCount
+		local playerWord = "players"
+		if inRangeCount == 1 then
+			playerWord = "player"
+		end
+		RBS_RadarRangeLabel:SetText(range .. " yd - " .. inRangeCount .. " " .. playerWord)
+	end
+end
+
+-- Content-visibility gate (2026-09-09) -- see RBS_ApplyRadarEnabled's own comment for the full
+-- reload-race story this fixes. RBS_RadarContentVisible tracks the last APPLIED state so this only
+-- touches widgets on an actual transition, not every single tick (SetBackdrop especially is not
+-- something worth redoing 20 times a second for no reason).
+RBS_RadarContentVisible = nil
+function RBS_SetRadarContentVisible(visible)
+	if visible == RBS_RadarContentVisible then
+		return
+	end
+	RBS_RadarContentVisible = visible
+	if not RaidBuffStatusRadarFrame then
+		return
+	end
+	if visible then
+		-- Same flat dark-panel trick documented in this project's own conventions (WHITE8X8 as both
+		-- bgFile and edgeFile, tinted via SetBackdropColor/SetBackdropBorderColor) -- kept underneath
+		-- the background image as a fallback, so a failed/missing texture still shows a panel instead
+		-- of nothing.
+		RaidBuffStatusRadarFrame:SetBackdrop({
+			bgFile = "Interface\\Buttons\\WHITE8X8",
+			edgeFile = "Interface\\Buttons\\WHITE8X8",
+			edgeSize = 1,
+			insets = { left = 0, right = 0, top = 0, bottom = 0 },
+		})
+		RaidBuffStatusRadarFrame:SetBackdropColor(0.05, 0.05, 0.05, 0.75)
+		RaidBuffStatusRadarFrame:SetBackdropBorderColor(0.3, 0.3, 0.3, 0.9)
+		if RBS_RadarBaseBG then
+			RBS_RadarBaseBG:Show()
+		end
+		if RBS_RadarTitle then
+			RBS_RadarTitle:Show()
+		end
+		if RBS_RadarRangeLabel then
+			RBS_RadarRangeLabel:Show()
+		end
+		if RBS_RadarCenterMarker then
+			RBS_RadarCenterMarker:Show()
+		end
+	else
+		RaidBuffStatusRadarFrame:SetBackdrop(nil)
+		if RBS_RadarBaseBG then
+			RBS_RadarBaseBG:Hide()
+		end
+		if RBS_RadarTitle then
+			RBS_RadarTitle:Hide()
+		end
+		if RBS_RadarRangeLabel then
+			RBS_RadarRangeLabel:Hide()
+		end
+		if RBS_RadarCenterMarker then
+			RBS_RadarCenterMarker:Hide()
+		end
+		for i = 1, RBS_RADAR_MAX_DOTS, 1 do
+			if RBS_RadarDots[i] then
+				RBS_RadarDots[i]:Hide()
+			end
+		end
+	end
+end
+
+function RBS_RadarFrameOnUpdate()
+	local curTime = GetTime()
+	if (curTime - RBS_RadarLastCheck) < RBS_RADAR_TICK_INTERVAL then
+		return
+	end
+	RBS_RadarLastCheck = curTime
+
+	-- Re-checked every tick, not decided once -- see RBS_ApplyRadarEnabled's own comment for why
+	-- this is what actually makes the radar reliably appear after a reload/login, not just a live
+	-- Options toggle click.
+	if not RaidBuffStatusConfig.RadarEnabled then
+		RBS_SetRadarContentVisible(false)
+		return
+	end
+	RBS_SetRadarContentVisible(true)
+
+	if RBS_RadarNeedsBuild then
+		RBS_RadarNeedsBuild = false
+		RBS_BuildRadarDots()
+	end
+	RBS_UpdateRadar()
+end
+
+-- Decorative background (2026-09-09, per the user) -- converted from a PNG the user provided
+-- (Pictures\Radar simple.png) via a from-scratch PNG-decode + box-resize + TGA-write pipeline (no
+-- external tools, matching this project's own established asset-pipeline approach), down to a
+-- 256x256 power-of-two texture. Any near-invisible alpha noise near the source PNG's edges is
+-- zeroed out before the resize -- a real in-game report once showed a faint red glow bleeding past
+-- the frame's own edges from exactly that kind of leftover near-zero-alpha noise.
+--
+-- "Interface\\Addons\\..." -- lowercase "ddons": an earlier texture attempt rendered as NOTHING at
+-- all -- this addon's real on-disk folder is "Addons" (confirmed via the live install path), and
+-- this client's texture loader resolves paths case-SENSITIVELY even on a case-insensitive Windows
+-- filesystem, so one wrong capital letter alone was enough to make the file "not exist" as far as
+-- SetTexture was concerned. A newly-added loose file may ALSO need a full client restart (not just
+-- /reload) before this client's own addon-folder file listing notices it.
+local RBS_RADAR_BG_TEXTURE = "Interface\\Addons\\RaidBuffStatus\\textures\\radar_bg_simple.tga"
+-- CONFIRMED root cause (2026-09-10, real report: "no veo el circulo en el radar") of the background
+-- circle silently never showing -- these three are all read by RBS_SetRadarContentVisible, which is
+-- defined EARLIER in this file than this declaration. A `local` here resolves as nil at that earlier
+-- point (the standing Lua-5.0.2 upvalue-ordering gotcha documented in this project's own notes), so
+-- RBS_SetRadarContentVisible's own `if RBS_RadarBaseBG then RBS_RadarBaseBG:Show() end` (etc.) was
+-- silently a no-op the whole time -- the texture was created and correctly Hidden at creation, but
+-- nothing ever showed it again. RBS_RadarCenterMarker already dodged this by being a plain global;
+-- the other two just hadn't been converted when this function was added during the DBZ-removal pass.
+RBS_RadarBaseBG = nil
+RBS_RadarTitle = nil
+RBS_RadarCenterMarker = nil
+
+local function RBS_CreateRadarFrame()
+	local size = RaidBuffStatusConfig.RadarSize or 180
+	local f = CreateFrame("Frame", "RaidBuffStatusRadarFrame", UIParent)
+	f:SetWidth(size)
+	f:SetHeight(size)
+	f:SetPoint("CENTER", UIParent, "CENTER", 220, 0)
+	f:SetFrameStrata("MEDIUM")
+	f:EnableMouse(true)
+	f:SetMovable(true)
+	f:RegisterForDrag("LeftButton")
+	f:SetScript("OnDragStart", function()
+		this:StartMoving()
+	end)
+	f:SetScript("OnDragStop", function()
+		this:StopMovingOrSizing()
+	end)
+	-- Right-click opens the Options window straight to this tab (2026-09-10, per the user).
+	-- OnMouseDown, not OnMouseUp -- this client's own confirmed gotcha: OnMouseUp doesn't fire
+	-- reliably on a plain CreateFrame("Frame") the way it does on a real Button widget.
+	f:SetScript("OnMouseDown", function()
+		if arg1 == "RightButton" then
+			RaidBuffStatus_ShowRadarOptions()
+		end
+	end)
+
+	local baseBG = f:CreateTexture(nil, "BACKGROUND")
+	baseBG:SetTexture(RBS_RADAR_BG_TEXTURE)
+	baseBG:SetAllPoints(f)
+	baseBG:Hide()
+	RBS_RadarBaseBG = baseBG
+
+	local title = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+	title:SetPoint("BOTTOM", f, "TOP", 0, 2)
+	title:SetText("Radar")
+	title:SetTextColor(0.7, 0.7, 0.7)
+	RBS_RadarTitle = title
+
+	-- Range/count indicator (2026-09-09, per the user) -- configured range + how many are actually
+	-- within it, refreshed every RBS_UpdateRadar tick. Global, not local -- see that function's own
+	-- comment on why.
+	local rangeLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+	rangeLabel:SetPoint("TOP", f, "BOTTOM", 0, -2)
+	rangeLabel:SetTextColor(0.7, 0.7, 0.7)
+	rangeLabel:SetText((RaidBuffStatusConfig.RadarRange or 60) .. " yd - 0 players")
+	RBS_RadarRangeLabel = rangeLabel
+
+	-- The player's own position -- always the frame's exact center by construction (every dot is
+	-- plotted relative to the player, not the player relative to anyone).
+	local center = f:CreateTexture(nil, "OVERLAY")
+	center:SetTexture(RBS_RADAR_DOT_TEXTURE)
+	local centerSize = RBS_RadarScaledSize(RBS_RADAR_CENTER_SIZE_FRACTION)
+	center:SetWidth(centerSize)
+	center:SetHeight(centerSize)
+	center:SetPoint("CENTER", f, "CENTER", 0, 0)
+	center:SetVertexColor(1, 1, 1, 1)
+	RBS_RadarCenterMarker = center
+
+	f:SetScript("OnUpdate", RBS_RadarFrameOnUpdate)
+
+	-- Never hidden -- see RBS_ApplyRadarEnabled's own comment for the full reload-race story this
+	-- avoids. Content visibility (backdrop, background image, labels, marker, dots) is what
+	-- RBS_SetRadarContentVisible toggles instead, driven by a fresh RadarEnabled check every tick.
+	f:Show()
+	RBS_SetRadarContentVisible(false)
+end
+
+-- "Reset position" for the Options window's Radar tab -- same pattern/reasoning as
+-- RBS_ResetCDPosition above (the radar's position isn't saved across reloads either, so this only
+-- ever needs to undo a mid-session drag).
+function RBS_ResetRadarPosition()
+	if not RaidBuffStatusRadarFrame then
+		return
+	end
+	RaidBuffStatusRadarFrame:ClearAllPoints()
+	RaidBuffStatusRadarFrame:SetPoint("CENTER", UIParent, "CENTER", 220, 0)
+end
+
 -- Re-applies every RaidBuffStatusConfig default AND refreshes the RBS_ICON_SIZE global mirror
 -- derived from it -- called from the ADDON_LOADED branch of RBS_OnEvent (registered in RBS_OnLoad),
 -- gated on arg1 == "RaidBuffStatus" so it only reacts to THIS addon finishing its own load, not any
@@ -2617,8 +3179,17 @@ function RBS_OnAddonLoaded()
 	RaidBuffStatusConfig.FightStartMisses = RaidBuffStatusConfig.FightStartMisses or false
 	RaidBuffStatusConfig.FightStartMissesDuration = RaidBuffStatusConfig.FightStartMissesDuration or 8
 	RaidBuffStatusConfig.MouseoverCast = RaidBuffStatusConfig.MouseoverCast or false
+	RaidBuffStatusConfig.HideInCombat = RaidBuffStatusConfig.HideInCombat or false
 	RaidBuffStatusConfig.TalentScanEnabled = RaidBuffStatusConfig.TalentScanEnabled or false
 	RaidBuffStatusConfig.CDRowLimit = RaidBuffStatusConfig.CDRowLimit or 0
+	-- ALWAYS starts off on login/reload (2026-09-10, per the user), regardless of whatever was saved
+	-- from a previous session -- not `or false` like every other toggle above (which would preserve a
+	-- saved `true`). RadarRange/RadarSize below still persist normally; only the on/off state resets
+	-- every load. /range (see RBS_OnLoad's slash command block) is the intended way to turn it on for
+	-- the current session -- the Options toggle still works too, it just won't stick past a reload.
+	RaidBuffStatusConfig.RadarEnabled = false
+	RaidBuffStatusConfig.RadarRange = RaidBuffStatusConfig.RadarRange or 60
+	RaidBuffStatusConfig.RadarSize = RaidBuffStatusConfig.RadarSize or 180
 	RaidBuffStatusConfig.DebugLog = RaidBuffStatusConfig.DebugLog or {}
 	RaidBuffStatusConfig.CDTrack = RaidBuffStatusConfig.CDTrack or {}
 	for i = 1, table.getn(RBS_CD_LIST), 1 do
@@ -2644,6 +3215,13 @@ function RBS_OnAddonLoaded()
 			RaidBuffStatusConfig.CDSaved[key] = nil
 		end
 	end
+
+	-- Covers the edge case of logging in (or /reload-ing) while ALREADY in combat with HideInCombat
+	-- on from a previous session -- PLAYER_REGEN_DISABLED won't fire again for combat that was
+	-- already in progress before this addon finished loading, so this re-syncs the icons' visibility
+	-- against the real (now-restored) config and the player's actual current combat state directly,
+	-- rather than waiting for the next combat transition.
+	RBS_ApplyDashboardCombatVisibility()
 end
 
 ------------------------------------------------------------------------------------------------------
@@ -2920,6 +3498,7 @@ function RBS_OnLoad()
 	this:RegisterEvent("CHAT_MSG_SPELL_SELF_DAMAGE")
 	this:RegisterEvent("CHAT_MSG_COMBAT_SELF_MISSES")
 	this:RegisterEvent("PLAYER_REGEN_DISABLED")
+	this:RegisterEvent("PLAYER_REGEN_ENABLED")
 	this:RegisterEvent("INSPECT_TALENT_READY")
 	-- SuperWoW-only (2026-09-03) -- see RBS_OnUnitCastEvent's own comment for why this is the real
 	-- fix for tracking OTHER group members' Kick/Challenging Shout/Innervate/etc. RegisterEvent
@@ -2945,6 +3524,7 @@ function RBS_OnLoad()
 	RBS_NeedsHeaderBuild = true
 
 	RBS_CreateCDFrame()
+	RBS_CreateRadarFrame()
 
 	-- Resize grip -- manual cursor-tracking resize (2026-08-27), NOT native StartSizing/
 	-- StopMovingOrSizing. Confirmed broken on this client: with StartSizing("BOTTOMRIGHT") only
@@ -3197,6 +3777,7 @@ function RBS_OnLoad()
 		RaidBuffStatusConfig.Enabled = not RaidBuffStatusConfig.Enabled
 		if RaidBuffStatusConfig.Enabled then
 			RaidBuffStatusFrame:Show()
+			RBS_ApplyDashboardCombatVisibility()
 		else
 			RaidBuffStatusFrame:Hide()
 		end
@@ -3205,11 +3786,61 @@ function RBS_OnLoad()
 		)
 	end
 
+	-- "/range <yards>" shows the radar at that range; bare "/range" hides it (2026-09-10, per the
+	-- user). A separate top-level slash command, not "/rbs range", per the exact request.
+	SLASH_RBSRANGE1 = "/range"
+	SlashCmdList["RBSRANGE"] = function(msg)
+		local trimmed = string.gsub(msg or "", "^%s*(.-)%s*$", "%1")
+		if trimmed == "" then
+			RBS_ApplyRadarEnabled(false)
+			DEFAULT_CHAT_FRAME:AddMessage("|cFF00CCFFRaidBuffStatus:|r Radar hidden.")
+			return
+		end
+		local yards = tonumber(trimmed)
+		if not yards or yards <= 0 then
+			DEFAULT_CHAT_FRAME:AddMessage(
+				"|cFF00CCFFRaidBuffStatus:|r Usage: /range <yards> to show the radar at that range, /range (no number) to hide it."
+			)
+			return
+		end
+		RaidBuffStatusConfig.RadarRange = yards
+		RBS_ApplyRadarEnabled(true)
+		DEFAULT_CHAT_FRAME:AddMessage("|cFF00CCFFRaidBuffStatus:|r Radar shown, range " .. yards .. " yards.")
+	end
+
 	if not RaidBuffStatusConfig.Enabled then
 		RaidBuffStatusFrame:Hide()
 	end
 
 	DEFAULT_CHAT_FRAME:AddMessage("|cFF00CCFFRaidBuffStatus:|r Loaded (build " .. RBS_BUILD .. "). /rbs to toggle, /rbs options for settings, /rbs debug to diagnose.")
+end
+
+-- Hides the buff-tracking icons while in combat, per the user (2026-09-10) -- shows them again once
+-- combat ends. Deliberately uses SetAlpha/EnableMouse, NEVER Frame:Hide()/Show(), even though that
+-- would look simpler: RBS_OnUpdate is THIS frame's own OnUpdate script, and it also drives
+-- RBS_CheckDeaths/RBS_CheckSalvationRemoval -- both explicitly documented as independent of the
+-- window's own visibility, since they're safety features that should keep working whether or not
+-- the icons are shown. A frame's OnUpdate never fires while it's genuinely Hidden (the exact bug
+-- already found and fixed for the Radar/CD frames this session) -- Hide()-ing this frame for combat
+-- would silently stop death warnings and Salvation removal for the whole fight, which is exactly
+-- when they matter most. Alpha 0 + disabled mouse makes it fully invisible and unclickable without
+-- ever touching Show()/Hide(), so this frame's OnUpdate (and everything riding on it) keeps ticking.
+function RBS_ApplyDashboardCombatVisibility()
+	if not RaidBuffStatusFrame then
+		return
+	end
+	-- Nothing to layer on top of if the whole window is already off via the normal Enabled toggle.
+	if not RaidBuffStatusConfig.Enabled then
+		return
+	end
+	local inCombat = UnitAffectingCombat("player")
+	if RaidBuffStatusConfig.HideInCombat and inCombat then
+		RaidBuffStatusFrame:SetAlpha(0)
+		RaidBuffStatusFrame:EnableMouse(false)
+	else
+		RaidBuffStatusFrame:SetAlpha(1)
+		RaidBuffStatusFrame:EnableMouse(true)
+	end
 end
 
 local RBS_LastScan = 0
