@@ -242,7 +242,7 @@ local function CreateGeneralTab()
 			hideInCombat = {
 				type = "toggle", order = 1.5, width = "full",
 				name = "Hide in combat",
-				desc = "Hides the buff tracker's icons while you're in combat, and shows them again once combat ends. Death warnings and Salvation removal keep working the whole time either way -- this only affects the icons' own visibility.",
+				desc = "Hides the buff tracker's icons while you're in combat, and stops scanning for missing buffs too (Soulstone keeps being tracked, since it also drives real cooldown tracking, not just its own icon) -- everything resumes the instant combat ends. Death warnings and Salvation removal keep working the whole time either way, unaffected by this.",
 				get = function()
 					return RaidBuffStatusConfig.HideInCombat
 				end,

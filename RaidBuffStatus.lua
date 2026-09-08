@@ -77,7 +77,7 @@ end
 -- actually running, without having to ask the user to check -- also flags whether a stale/second
 -- copy of this addon (e.g. a leftover install of the old reference folder reusing the same global
 -- names) might be clobbering these functions after this file loads.
-RBS_BUILD = "v101-soulstone-cd-row"
+RBS_BUILD = "v105-idle-means-idle"
 
 -- CONFIRMED via real raid testing (2026-08-31): right after a disconnect/reconnect (server kick,
 -- zone in, etc.), C_UnitAuras.GetAuraDataByIndex can return NOTHING for a window of several
@@ -1087,9 +1087,24 @@ function RBS_UpdateDashboard()
 		return
 	end
 
+	-- Combat-hidden (2026-09-10, per the user: "si la gente elige que 'Hide in combat' este deberia
+	-- parar de escanear y consumir, a lo sumo escanear unicamente la Soulstone") -- same condition
+	-- RBS_ApplyDashboardCombatVisibility uses to decide the icons are actually invisible right now.
+	-- The full buff-list scan (RBS_ScanAllBuffCounts, an aura-list walk across the whole roster) and
+	-- every non-Soulstone icon's own SetText/SetTextColor are skipped entirely while true -- there's
+	-- nothing to compute for icons nobody can see anyway. Soulstone is the one exception, kept
+	-- running -- its own scan (RBS_ScanSoulstone) is what drives real cooldown-transition tracking,
+	-- not just this icon's display, so it stays accurate the instant combat ends and the icons
+	-- reappear, and it's comparatively cheap (one aura substring check per roster member, not a
+	-- pass over every tracked buff).
+	local combatHidden = RaidBuffStatusConfig.HideInCombat and UnitAffectingCombat("player")
+
 	-- ONE combined roster/aura pass for every non-Soulstone buff (see RBS_ScanAllBuffCounts' own
 	-- comment) instead of one full pass per buff definition.
-	local counts = RBS_ScanAllBuffCounts()
+	local counts
+	if not combatHidden then
+		counts = RBS_ScanAllBuffCounts()
+	end
 
 	for b = 1, table.getn(RBS_BUFF_LIST), 1 do
 		local btn = RBS_BuffIcons[b]
@@ -1112,7 +1127,7 @@ function RBS_UpdateDashboard()
 				else
 					btn.rbsCount:SetTextColor(1, 0.3, 0.3)
 				end
-			else
+			elseif not combatHidden then
 				local missingCount = counts[def.id] or 0
 				-- Explicit tostring() (2026-08-26): the number wasn't appearing at all with a raw
 				-- number passed straight to SetText -- forcing a string conversion first fixed it.
@@ -2974,14 +2989,38 @@ end
 -- full timing) -- so the frame's very first Show()/Hide() decision, made back at creation time, was
 -- reading a config value that hadn't been replaced with the real saved one yet. Once that stale
 -- decision hid the frame, nothing ever re-showed it, even after the real (enabled) value arrived
--- moments later, because a hidden frame's OnUpdate never runs to check again.
--- Fix: never hide the frame itself at all (same as the CD frame) -- RaidBuffStatusRadarFrame stays
--- shown forever after creation, so its OnUpdate keeps ticking regardless of config timing, and
--- RBS_RadarFrameOnUpdate re-checks RadarEnabled on every single tick (see RBS_SetRadarContentVisible
--- below) instead of only once. This function now only ever needs to update the config value itself
--- -- the next tick (within RBS_RADAR_TICK_INTERVAL, currently 0.05s) picks it up on its own.
+-- LAZY creation (2026-09-10, per the user: "el radar no deberia funcionar ni correr hasta que se
+-- use por primera vez el /range x") -- RBS_CreateRadarFrame() is no longer called anywhere at
+-- login/world-enter at all; the frame (and its one custom texture load, radar_bg_simple.tga -- see
+-- the earlier fix in this same file's history for why that specific load was suspected in a real
+-- client-crash report) now only ever gets built the FIRST time the radar is actually turned on,
+-- whether via "/range <yards>" or the Options "Enabled" toggle (both funnel through here). A user
+-- who never enables the radar this session never triggers any of this code at all.
+--
+-- SIMPLIFIED BACK TO PLAIN Hide()/Show() (2026-09-10, per the user: "siempre y cuando no se haya
+-- utilizado el /range x no deberia tampoco estar escaneando ni nada... solo cuando este activo") --
+-- an EARLIER version of this function deliberately never hid the frame at all, keeping its OnUpdate
+-- ticking forever (at 20/sec) even while switched off, specifically to dodge a SavedVariables-
+-- timing race where the frame's very first Show()/Hide() decision (made during this addon's own
+-- file load) could read a RadarEnabled value that hadn't been replaced with the real saved one yet.
+-- That race genuinely doesn't apply anymore now that creation is lazy: the frame is only EVER
+-- created here, inside this direct, deliberate, already-fully-loaded user action (a slash command
+-- or an Options click) -- there's no more "config not settled yet" moment for it to race against.
+-- So Hide()/Show() is safe again, and means an OFF radar's OnUpdate script (RBS_RadarFrameOnUpdate)
+-- never fires AT ALL while hidden -- no throttle check, no roster walk, no UnitPosition calls,
+-- genuinely nothing -- exactly "solo cuando este activo".
 function RBS_ApplyRadarEnabled(enabled)
 	RaidBuffStatusConfig.RadarEnabled = enabled
+	if enabled and not RaidBuffStatusRadarFrame then
+		RBS_CreateRadarFrame()
+	end
+	if RaidBuffStatusRadarFrame then
+		if enabled then
+			RaidBuffStatusRadarFrame:Show()
+		else
+			RaidBuffStatusRadarFrame:Hide()
+		end
+	end
 	if enabled and not (RBS_HasSuperWoW and UnitPosition) then
 		DEFAULT_CHAT_FRAME:AddMessage(
 			"|cFF00CCFFRaidBuffStatus:|r Radar needs SuperWoW (for UnitPosition) -- it isn't detected on this client, so the radar will stay empty."
@@ -3124,81 +3163,18 @@ function RBS_UpdateRadar()
 	end
 end
 
--- Content-visibility gate (2026-09-09) -- see RBS_ApplyRadarEnabled's own comment for the full
--- reload-race story this fixes. RBS_RadarContentVisible tracks the last APPLIED state so this only
--- touches widgets on an actual transition, not every single tick (SetBackdrop especially is not
--- something worth redoing 20 times a second for no reason).
-RBS_RadarContentVisible = nil
-function RBS_SetRadarContentVisible(visible)
-	if visible == RBS_RadarContentVisible then
-		return
-	end
-	RBS_RadarContentVisible = visible
-	if not RaidBuffStatusRadarFrame then
-		return
-	end
-	if visible then
-		-- Same flat dark-panel trick documented in this project's own conventions (WHITE8X8 as both
-		-- bgFile and edgeFile, tinted via SetBackdropColor/SetBackdropBorderColor) -- kept underneath
-		-- the background image as a fallback, so a failed/missing texture still shows a panel instead
-		-- of nothing.
-		RaidBuffStatusRadarFrame:SetBackdrop({
-			bgFile = "Interface\\Buttons\\WHITE8X8",
-			edgeFile = "Interface\\Buttons\\WHITE8X8",
-			edgeSize = 1,
-			insets = { left = 0, right = 0, top = 0, bottom = 0 },
-		})
-		RaidBuffStatusRadarFrame:SetBackdropColor(0.05, 0.05, 0.05, 0.75)
-		RaidBuffStatusRadarFrame:SetBackdropBorderColor(0.3, 0.3, 0.3, 0.9)
-		if RBS_RadarBaseBG then
-			RBS_RadarBaseBG:Show()
-		end
-		if RBS_RadarTitle then
-			RBS_RadarTitle:Show()
-		end
-		if RBS_RadarRangeLabel then
-			RBS_RadarRangeLabel:Show()
-		end
-		if RBS_RadarCenterMarker then
-			RBS_RadarCenterMarker:Show()
-		end
-	else
-		RaidBuffStatusRadarFrame:SetBackdrop(nil)
-		if RBS_RadarBaseBG then
-			RBS_RadarBaseBG:Hide()
-		end
-		if RBS_RadarTitle then
-			RBS_RadarTitle:Hide()
-		end
-		if RBS_RadarRangeLabel then
-			RBS_RadarRangeLabel:Hide()
-		end
-		if RBS_RadarCenterMarker then
-			RBS_RadarCenterMarker:Hide()
-		end
-		for i = 1, RBS_RADAR_MAX_DOTS, 1 do
-			if RBS_RadarDots[i] then
-				RBS_RadarDots[i]:Hide()
-			end
-		end
-	end
-end
-
+-- SIMPLIFIED (2026-09-10) -- an EARLIER version of this needed a whole content-visibility gate
+-- (RBS_SetRadarContentVisible, since removed) specifically because the frame itself was
+-- deliberately never hidden. Now that RBS_ApplyRadarEnabled goes back to plain Hide()/Show() on the
+-- frame directly (see its own comment for why that's safe again), this OnUpdate script -- and
+-- everything it calls -- simply never fires at all while the radar is off, which is the actual
+-- "solo cuando este activo" behavior the user asked for, not just a visual illusion of it.
 function RBS_RadarFrameOnUpdate()
 	local curTime = GetTime()
 	if (curTime - RBS_RadarLastCheck) < RBS_RADAR_TICK_INTERVAL then
 		return
 	end
 	RBS_RadarLastCheck = curTime
-
-	-- Re-checked every tick, not decided once -- see RBS_ApplyRadarEnabled's own comment for why
-	-- this is what actually makes the radar reliably appear after a reload/login, not just a live
-	-- Options toggle click.
-	if not RaidBuffStatusConfig.RadarEnabled then
-		RBS_SetRadarContentVisible(false)
-		return
-	end
-	RBS_SetRadarContentVisible(true)
 
 	if RBS_RadarNeedsBuild then
 		RBS_RadarNeedsBuild = false
@@ -3221,19 +3197,27 @@ end
 -- SetTexture was concerned. A newly-added loose file may ALSO need a full client restart (not just
 -- /reload) before this client's own addon-folder file listing notices it.
 local RBS_RADAR_BG_TEXTURE = "Interface\\Addons\\RaidBuffStatus\\textures\\radar_bg_simple.tga"
--- CONFIRMED root cause (2026-09-10, real report: "no veo el circulo en el radar") of the background
--- circle silently never showing -- these three are all read by RBS_SetRadarContentVisible, which is
--- defined EARLIER in this file than this declaration. A `local` here resolves as nil at that earlier
--- point (the standing Lua-5.0.2 upvalue-ordering gotcha documented in this project's own notes), so
--- RBS_SetRadarContentVisible's own `if RBS_RadarBaseBG then RBS_RadarBaseBG:Show() end` (etc.) was
--- silently a no-op the whole time -- the texture was created and correctly Hidden at creation, but
--- nothing ever showed it again. RBS_RadarCenterMarker already dodged this by being a plain global;
--- the other two just hadn't been converted when this function was added during the DBZ-removal pass.
-RBS_RadarBaseBG = nil
-RBS_RadarTitle = nil
+-- Plain global, not local -- RBS_ApplyRadarDotScale (defined much earlier in this file, near the
+-- dot pool itself) reads this to live-resize the marker when the Size slider moves, and a `local`
+-- here would resolve as nil at that earlier point (the standing Lua-5.0.2 upvalue-ordering gotcha
+-- documented throughout this project). The background texture and title FontString don't need this
+-- treatment anymore (2026-09-10) -- nothing outside RBS_CreateRadarFrame itself reads them now that
+-- content visibility just follows the frame's own Hide()/Show(), so they're plain locals below.
 RBS_RadarCenterMarker = nil
 
-local function RBS_CreateRadarFrame()
+-- Plain global, not local -- called lazily from RBS_ApplyRadarEnabled (defined much EARLIER in this
+-- file than here, the standing Lua-5.0.2 upvalue-ordering gotcha documented throughout this
+-- project) the FIRST time the radar is actually turned on, per the user (2026-09-10): "el radar no
+-- deberia funcionar ni correr hasta que se use por primera vez el /range x". This also happens to
+-- be a real fix for an earlier crash report (a raid member's client crashed on login, only ever
+-- fixed by disabling the addon, finishing login, then re-enabling it once already in world) -- this
+-- is the only place in the whole addon that loads a CUSTOM texture (radar_bg_simple.tga)
+-- synchronously, and this project has an already-confirmed history of custom texture loading being
+-- able to crash this client outright when something about the load isn't ready yet (see the TGA
+-- pipeline's own byte-17 comment elsewhere in this file for the precedent). A user who never
+-- enables the radar this session never triggers any of this code at all -- not even once at
+-- PLAYER_ENTERING_WORLD, which an earlier version of this fix still did unconditionally.
+function RBS_CreateRadarFrame()
 	local size = RaidBuffStatusConfig.RadarSize or 180
 	local f = CreateFrame("Frame", "RaidBuffStatusRadarFrame", UIParent)
 	f:SetWidth(size)
@@ -3258,17 +3242,30 @@ local function RBS_CreateRadarFrame()
 		end
 	end)
 
+	-- Same flat dark-panel trick documented in this project's own conventions (WHITE8X8 as both
+	-- bgFile and edgeFile, tinted via SetBackdropColor/SetBackdropBorderColor) -- kept underneath
+	-- the background image as a fallback, so a failed/missing texture still shows a panel instead of
+	-- nothing. Applied once, unconditionally, here -- content visibility no longer needs its own
+	-- separate toggle (2026-09-10): the frame itself is genuinely Hidden/Shown by RBS_ApplyRadarEnabled
+	-- now, and everything anchored to a hidden parent is automatically invisible regardless of its
+	-- own Show()/Hide() state, so there's nothing left to coordinate here.
+	f:SetBackdrop({
+		bgFile = "Interface\\Buttons\\WHITE8X8",
+		edgeFile = "Interface\\Buttons\\WHITE8X8",
+		edgeSize = 1,
+		insets = { left = 0, right = 0, top = 0, bottom = 0 },
+	})
+	f:SetBackdropColor(0.05, 0.05, 0.05, 0.75)
+	f:SetBackdropBorderColor(0.3, 0.3, 0.3, 0.9)
+
 	local baseBG = f:CreateTexture(nil, "BACKGROUND")
 	baseBG:SetTexture(RBS_RADAR_BG_TEXTURE)
 	baseBG:SetAllPoints(f)
-	baseBG:Hide()
-	RBS_RadarBaseBG = baseBG
 
 	local title = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
 	title:SetPoint("BOTTOM", f, "TOP", 0, 2)
 	title:SetText("Radar")
 	title:SetTextColor(0.7, 0.7, 0.7)
-	RBS_RadarTitle = title
 
 	-- Range/count indicator (2026-09-09, per the user) -- configured range + how many are actually
 	-- within it, refreshed every RBS_UpdateRadar tick. Global, not local -- see that function's own
@@ -3292,11 +3289,10 @@ local function RBS_CreateRadarFrame()
 
 	f:SetScript("OnUpdate", RBS_RadarFrameOnUpdate)
 
-	-- Never hidden -- see RBS_ApplyRadarEnabled's own comment for the full reload-race story this
-	-- avoids. Content visibility (backdrop, background image, labels, marker, dots) is what
-	-- RBS_SetRadarContentVisible toggles instead, driven by a fresh RadarEnabled check every tick.
-	f:Show()
-	RBS_SetRadarContentVisible(false)
+	-- Starts hidden -- RBS_ApplyRadarEnabled (the only caller that ever creates this frame) always
+	-- calls :Show() right after this returns, since creation only ever happens while enabling, but
+	-- this is still the correct, explicit default rather than trusting CreateFrame's own default.
+	f:Hide()
 end
 
 -- "Reset position" for the Options window's Radar tab -- same pattern/reasoning as
@@ -3686,7 +3682,8 @@ function RBS_OnLoad()
 	RBS_NeedsHeaderBuild = true
 
 	RBS_CreateCDFrame()
-	RBS_CreateRadarFrame()
+	-- RBS_CreateRadarFrame() is NOT called here anymore (2026-09-10) -- see its own comment for
+	-- why: it's now built lazily, the first time the radar is actually turned on.
 
 	-- Resize grip -- manual cursor-tracking resize (2026-08-27), NOT native StartSizing/
 	-- StopMovingOrSizing. Confirmed broken on this client: with StartSizing("BOTTOMRIGHT") only
